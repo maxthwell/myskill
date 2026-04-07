@@ -1,0 +1,23 @@
+[
+  {
+    "id": "training-drum",
+    "label": "Training Drum",
+    "color": [0.72, 0.22, 0.14, 1.0],
+    "width": 1.0,
+    "height": 1.0
+  },
+  {
+    "id": "lantern",
+    "label": "Lantern",
+    "color": [0.95, 0.74, 0.28, 1.0],
+    "width": 0.5,
+    "height": 0.9
+  },
+  {
+    "id": "weapon-rack",
+    "label": "Weapon Rack",
+    "color": [0.44, 0.28, 0.18, 1.0],
+    "width": 1.4,
+    "height": 1.2
+  }
+]

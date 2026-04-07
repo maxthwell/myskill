@@ -1,0 +1,13 @@
+{
+  "display_name": "Star",
+  "category": "sky",
+  "default_layer": "back",
+  "anchor": [
+    0.5,
+    0.5
+  ],
+  "base_width": 128,
+  "base_height": 128,
+  "animated": true,
+  "shadow_alpha": 0
+}

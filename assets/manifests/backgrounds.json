@@ -1,0 +1,37 @@
+[
+  {
+    "id": "temple-courtyard",
+    "label": "Temple Courtyard",
+    "sky_color": [0.73, 0.84, 0.98, 1.0],
+    "ground_color": [0.64, 0.58, 0.44, 1.0],
+    "accent_color": [0.84, 0.42, 0.18, 1.0]
+  },
+  {
+    "id": "mountain-cliff",
+    "label": "Mountain Cliff",
+    "sky_color": [0.62, 0.78, 0.95, 1.0],
+    "ground_color": [0.36, 0.38, 0.32, 1.0],
+    "accent_color": [0.84, 0.84, 0.84, 1.0]
+  },
+  {
+    "id": "inn-hall",
+    "label": "Inn Hall",
+    "sky_color": [0.76, 0.68, 0.56, 1.0],
+    "ground_color": [0.38, 0.25, 0.18, 1.0],
+    "accent_color": [0.92, 0.77, 0.39, 1.0]
+  },
+  {
+    "id": "training-ground",
+    "label": "Training Ground",
+    "sky_color": [0.74, 0.86, 0.94, 1.0],
+    "ground_color": [0.54, 0.61, 0.43, 1.0],
+    "accent_color": [0.66, 0.26, 0.14, 1.0]
+  },
+  {
+    "id": "night-bridge",
+    "label": "Night Bridge",
+    "sky_color": [0.10, 0.14, 0.28, 1.0],
+    "ground_color": [0.17, 0.18, 0.22, 1.0],
+    "accent_color": [0.94, 0.76, 0.28, 1.0]
+  }
+]

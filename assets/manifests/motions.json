@@ -1,0 +1,23 @@
+[
+  {"id": "idle", "type": "pose"},
+  {"id": "talk", "type": "pose"},
+  {"id": "enter", "type": "travel"},
+  {"id": "exit", "type": "travel"},
+  {"id": "point", "type": "pose"},
+  {"id": "nod", "type": "pose"},
+  {"id": "dragon-palm", "type": "special"},
+  {"id": "thunder-strike", "type": "special"},
+  {"id": "sword-arc", "type": "special"},
+  {"id": "flying-kick", "type": "martial"},
+  {"id": "double-palm-push", "type": "martial"},
+  {"id": "spin-kick", "type": "martial"},
+  {"id": "diagonal-kick", "type": "martial"},
+  {"id": "hook-punch", "type": "martial"},
+  {"id": "swing-punch", "type": "martial"},
+  {"id": "straight-punch", "type": "martial"},
+  {"id": "combo-punch", "type": "martial"},
+  {"id": "somersault", "type": "acrobatics"},
+  {"id": "handstand-walk", "type": "acrobatics"},
+  {"id": "big-jump", "type": "acrobatics"},
+  {"id": "dunk", "type": "acrobatics"}
+]

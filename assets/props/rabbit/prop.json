@@ -1,0 +1,13 @@
+{
+  "display_name": "Rabbit",
+  "category": "animal",
+  "default_layer": "front",
+  "anchor": [
+    0.5,
+    1.0
+  ],
+  "base_width": 160,
+  "base_height": 160,
+  "animated": true,
+  "shadow_alpha": 24
+}

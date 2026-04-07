@@ -1,0 +1,15 @@
+{
+  "display_name": "Wall Double Door",
+  "category": "architecture",
+  "default_layer": "back",
+  "default_mount": "back-wall",
+  "anchor": [0.5, 0.5],
+  "base_width": 250,
+  "base_height": 300,
+  "render_style": "double-door",
+  "frame_color": [96, 66, 34],
+  "door_color": [118, 82, 48, 0.78],
+  "glass_color": [255, 255, 255, 0.0],
+  "frame_padding": 0.08,
+  "shadow_alpha": 0
+}

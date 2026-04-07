@@ -1,0 +1,22 @@
+[
+  {
+    "id": "dragon-palm",
+    "label": "Dragon Palm",
+    "color": [1.00, 0.18, 0.14, 0.92]
+  },
+  {
+    "id": "thunder-strike",
+    "label": "Thunder Strike",
+    "color": [0.14, 0.52, 1.00, 0.92]
+  },
+  {
+    "id": "sword-arc",
+    "label": "Sword Arc",
+    "color": [0.10, 0.96, 0.32, 0.90]
+  },
+  {
+    "id": "aura",
+    "label": "Aura",
+    "color": [0.96, 0.20, 0.16, 0.28]
+  }
+]

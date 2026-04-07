@@ -1,0 +1,4 @@
+interface:
+  display_name: "Pygame Agent Video"
+  short_description: "Create and render local story videos with pygame, TTS, BGM, effects, and audio."
+  default_prompt: "Start with scripts/agent_ready.py, inspect local assets, then edit or run an existing scripts/generate_*.py video script to produce the mp4."

@@ -1,0 +1,21 @@
+{
+  "display_name": "特朗普",
+  "gender_presentation": "masculine",
+  "tts_speaker_id": "zh-CN-YunxiNeural",
+  "body_color": [24, 48, 118],
+  "accent_color": [176, 34, 34],
+  "trim_color": [244, 232, 194],
+  "skin_color": [244, 210, 182],
+  "hair_color": [236, 186, 74],
+  "garment": "coat",
+  "outfit_style": "modern_office",
+  "headwear": "none",
+  "facial_hair": "none",
+  "accessory": "none",
+  "hairstyle": "side_part",
+  "head_style": "expressive_head",
+  "head_anchor": {
+    "offset": [0, -10],
+    "scale": 1.0
+  }
+}

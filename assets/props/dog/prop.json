@@ -1,0 +1,13 @@
+{
+  "display_name": "Dog",
+  "category": "animal",
+  "default_layer": "front",
+  "anchor": [
+    0.5,
+    1.0
+  ],
+  "base_width": 180,
+  "base_height": 140,
+  "animated": true,
+  "shadow_alpha": 30
+}

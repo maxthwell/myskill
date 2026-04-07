@@ -1,0 +1,14 @@
+{
+  "display_name": "Wall Window",
+  "category": "architecture",
+  "default_layer": "back",
+  "default_mount": "back-wall",
+  "anchor": [0.5, 0.5],
+  "base_width": 220,
+  "base_height": 180,
+  "render_style": "window",
+  "frame_color": [112, 84, 48],
+  "glass_color": [196, 226, 255, 0.18],
+  "frame_padding": 0.10,
+  "shadow_alpha": 0
+}
