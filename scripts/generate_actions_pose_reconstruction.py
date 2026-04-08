@@ -61,7 +61,7 @@ POSE_EDGES = [
     ("right_knee", "right_ankle"),
 ]
 HEAD_FILL = (250, 249, 242, 255)
-HEAD_OUTLINE = (54, 48, 44, 255)
+HEAD_OUTLINE = (178, 178, 178, 255)
 EAR_FILL = (28, 28, 28, 255)
 EAR_OUTLINE = (12, 12, 12, 255)
 EYE_PATCH_FILL = (36, 36, 36, 255)
@@ -659,31 +659,57 @@ def _draw_torso(
     stage_points: dict[str, tuple[float, float]],
     palette: CharacterPalette = DEFAULT_PALETTE,
 ) -> None:
-    required = ("left_shoulder", "right_shoulder", "right_hip", "left_hip")
-    if any(key not in stage_points for key in required):
+    polygon = _torso_polygon(stage_points)
+    if not polygon:
         return
-    ls = stage_points["left_shoulder"]
-    rs = stage_points["right_shoulder"]
-    rh = stage_points["right_hip"]
-    lh = stage_points["left_hip"]
-    polygon = [ls, rs, rh, lh]
     draw.polygon(polygon, fill=palette.torso_fill, outline=palette.torso_outline)
 
 
-def _draw_torso_texture(image: Image.Image, stage_points: dict[str, tuple[float, float]], textures: TexturePack = TEXTURES) -> None:
+def _torso_polygon(stage_points: dict[str, tuple[float, float]]) -> list[tuple[float, float]]:
     required = ("left_shoulder", "right_shoulder", "right_hip", "left_hip")
     if any(key not in stage_points for key in required):
-        return
+        return []
     ls = stage_points["left_shoulder"]
     rs = stage_points["right_shoulder"]
     rh = stage_points["right_hip"]
     lh = stage_points["left_hip"]
-    polygon = [
-        ls,
-        rs,
-        rh,
-        lh,
-    ]
+    shoulder_center = ((ls[0] + rs[0]) * 0.5, (ls[1] + rs[1]) * 0.5)
+    hip_center = ((lh[0] + rh[0]) * 0.5, (lh[1] + rh[1]) * 0.5)
+    down_x = hip_center[0] - shoulder_center[0]
+    down_y = hip_center[1] - shoulder_center[1]
+    torso_height = max(24.0, float(np.hypot(down_x, down_y)))
+    down_len = max(1.0, float(np.hypot(down_x, down_y)))
+    down_unit = (down_x / down_len, down_y / down_len)
+    side_unit = (-down_unit[1], down_unit[0])
+    shoulder_span = max(22.0, float(np.hypot(rs[0] - ls[0], rs[1] - ls[1])))
+    hip_span = max(24.0, float(np.hypot(rh[0] - lh[0], rh[1] - lh[1])))
+
+    neck_half = shoulder_span * 0.16
+    upper_half = shoulder_span * 0.28
+    waist_half = max(upper_half * 0.92, hip_span * 0.26)
+    hip_half = hip_span * 0.34
+
+    def point(axial: float, lateral: float) -> tuple[float, float]:
+        return (
+            shoulder_center[0] + down_unit[0] * axial + side_unit[0] * lateral,
+            shoulder_center[1] + down_unit[1] * axial + side_unit[1] * lateral,
+        )
+
+    top_left = point(torso_height * 0.06, -neck_half)
+    upper_left = point(torso_height * 0.22, -upper_half)
+    mid_left = point(torso_height * 0.50, -waist_half)
+    low_left = point(torso_height * 0.84, -hip_half)
+    low_right = point(torso_height * 0.84, hip_half)
+    mid_right = point(torso_height * 0.50, waist_half)
+    upper_right = point(torso_height * 0.22, upper_half)
+    top_right = point(torso_height * 0.06, neck_half)
+    return [top_left, upper_left, mid_left, low_left, low_right, mid_right, upper_right, top_right]
+
+
+def _draw_torso_texture(image: Image.Image, stage_points: dict[str, tuple[float, float]], textures: TexturePack = TEXTURES) -> None:
+    polygon = _torso_polygon(stage_points)
+    if not polygon:
+        return
     xs = [point[0] for point in polygon]
     ys = [point[1] for point in polygon]
     pad = 18
@@ -698,18 +724,22 @@ def _draw_torso_texture(image: Image.Image, stage_points: dict[str, tuple[float,
     shifted = [(x - x0, y - y0) for x, y in polygon]
     mask_draw.polygon(shifted, fill=255)
     _paste_texture(image, textures.body, (x0, y0, x1, y1), mask=mask)
+    ls = stage_points["left_shoulder"]
+    rs = stage_points["right_shoulder"]
+    lh = stage_points["left_hip"]
+    rh = stage_points["right_hip"]
     shoulder_center = ((ls[0] + rs[0]) * 0.5, (ls[1] + rs[1]) * 0.5)
     hip_center = ((lh[0] + rh[0]) * 0.5, (lh[1] + rh[1]) * 0.5)
     torso_center = ((shoulder_center[0] + hip_center[0]) * 0.5, (shoulder_center[1] + hip_center[1]) * 0.5)
-    torso_width = max(24.0, float(np.hypot(rs[0] - ls[0], rs[1] - ls[1])))
+    torso_width = max(20.0, float(np.hypot(rs[0] - ls[0], rs[1] - ls[1])) * 0.78)
     torso_height = max(28.0, float(np.hypot(hip_center[0] - shoulder_center[0], hip_center[1] - shoulder_center[1])))
     angle = 90.0 - np.degrees(np.arctan2(hip_center[1] - shoulder_center[1], hip_center[0] - shoulder_center[0]))
     _paste_rotated_texture(
         image,
         textures.outfit,
-        (torso_center[0], torso_center[1] + torso_height * 0.20),
-        width=torso_width * 1.26,
-        height=torso_height * 2.24,
+        (torso_center[0], torso_center[1] + torso_height * 0.16),
+        width=torso_width * 1.12,
+        height=torso_height * 2.10,
         angle_deg=angle,
     )
 
@@ -768,11 +798,17 @@ def _draw_panda_head(
     y1 = min(head_layer.height, int(round(local_cy + ry)))
     if x1 <= x0 or y1 <= y0:
         return
-    mask = Image.new("L", (x1 - x0, y1 - y0), 0)
+    face_pad_x = max(1, int(round(size * 0.05)))
+    face_pad_y = max(1, int(round(size * 0.04)))
+    fx0 = max(0, x0 - face_pad_x)
+    fy0 = max(0, y0 - face_pad_y)
+    fx1 = min(head_layer.width, x1 + face_pad_x)
+    fy1 = min(head_layer.height, y1 + face_pad_y)
+    mask = Image.new("L", (fx1 - fx0, fy1 - fy0), 0)
     mask_draw = ImageDraw.Draw(mask)
-    mask_draw.ellipse((0, 0, x1 - x0, y1 - y0), fill=255)
+    mask_draw.ellipse((x0 - fx0, y0 - fy0, x1 - fx0, y1 - fy0), fill=255)
     head_draw.ellipse((local_cx - rx, local_cy - ry, local_cx + rx, local_cy + ry), fill=HEAD_FILL)
-    _paste_texture(head_layer, face_texture or textures.face, (x0, y0, x1, y1), mask=mask)
+    _paste_texture(head_layer, face_texture or textures.face, (fx0, fy0, fx1, fy1), mask=mask)
     head_draw.ellipse((local_cx - rx, local_cy - ry, local_cx + rx, local_cy + ry), outline=HEAD_OUTLINE, width=outline_w)
     rotated = head_layer.rotate(angle_deg, expand=True, resample=Image.Resampling.BICUBIC)
     image.alpha_composite(rotated, (int(round(cx - rotated.width * 0.5)), int(round(cy - rotated.height * 0.5))))

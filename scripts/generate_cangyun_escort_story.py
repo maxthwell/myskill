@@ -13,9 +13,10 @@ from functools import lru_cache
 from pathlib import Path
 
 import edge_tts
-from PIL import Image, ImageDraw, ImageFont, ImageSequence
 
 import generate_actions_pose_reconstruction as poseviz
+from common.io import manifest_index, resolve_effect_asset
+from common.panda_true3d_renderer import PandaTrue3DRenderer
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -25,7 +26,7 @@ OUTPUT_DEFAULT = ROOT_DIR / "outputs" / "cangyun_escort_story.mp4"
 DEFAULT_FPS = 24
 FAST_FPS = 12
 FAST2_FPS = 8
-FAST3_FPS = 6
+FAST3_FPS = 5
 DEFAULT_WIDTH = 960
 DEFAULT_HEIGHT = 540
 FAST_WIDTH = DEFAULT_WIDTH
@@ -37,19 +38,12 @@ FAST3_HEIGHT = 270
 WIDTH = DEFAULT_WIDTH
 HEIGHT = DEFAULT_HEIGHT
 TITLE = "寒江断令"
-GROUND_Y = HEIGHT * 0.82
 TALK_GAP_S = 0.28
-TALK_MOUTH_CYCLE_FRAMES = 4
-FONT_REGULAR = Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc")
-FONT_BOLD = Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc")
+EXPRESSION_CYCLE_S = 2.4
 ACTION_TRACKS = {"拳击", "翻跟头gif", "人物A飞踢倒人物B", "舞剑", "跑", "连续后空翻", "降龙十八掌", "鲤鱼打挺"}
-LEG_POINTS = {"left_hip", "right_hip", "left_knee", "right_knee", "left_ankle", "right_ankle"}
-ARM_POINTS = {"left_shoulder", "right_shoulder", "left_elbow", "right_elbow", "left_wrist", "right_wrist"}
-EFFECT_DENSITY = 1.0
 EFFECT_PLAYBACK_RATE = 2.8
-EFFECT_ALPHA_MIN = 220
-EFFECT_ALPHA_MAX = 255
-RENDER_PROFILE = "normal"
+EFFECT_ALPHA_MIN = 100
+EFFECT_ALPHA_MAX = 150
 EFFECT_ONE_SHOT_DURATION_S: dict[str, float] = {
     "rain": 2.2,
     "wind": 2.0,
@@ -83,6 +77,7 @@ EFFECT_ASSET_MAP: dict[str, tuple[str, tuple[float, float, float, float], float]
     "embers": ("启动大招特效", (0.0, 0.0, 1.0, 1.0), 0.18),
     "dust": ("夕阳武士", (0.0, 0.0, 1.0, 1.0), 0.16),
 }
+BACKGROUND_IDS = set(manifest_index("backgrounds").keys())
 
 
 @dataclass(frozen=True)
@@ -115,6 +110,13 @@ class LineSpec:
 
 
 @dataclass(frozen=True)
+class ExpressionCue:
+    actor_id: str
+    start_s: float
+    expression: str
+
+
+@dataclass(frozen=True)
 class SceneSpec:
     scene_id: str
     title: str
@@ -125,7 +127,9 @@ class SceneSpec:
     background_bottom: tuple[int, int, int]
     accent: tuple[int, int, int]
     effect: str
+    bgm_group: str | None = None
     sfx: tuple[SfxCue, ...] = field(default_factory=tuple)
+    expression_cues: tuple[ExpressionCue, ...] = field(default_factory=tuple)
     hold_s: float = 0.42
 
 
@@ -143,6 +147,14 @@ class ScheduledLine:
     duration_s: float
 
 
+@dataclass(frozen=True)
+class ScheduledExpressionCue:
+    actor_id: str
+    start_s: float
+    expression: str
+    priority: int
+
+
 SCENES: list[SceneSpec] = [
     SceneSpec(
         scene_id="01",
@@ -158,6 +170,7 @@ SCENES: list[SceneSpec] = [
             LineSpec("ning", "我带药囊和封蜡，路上若有人查匣，我来替你周旋。", "neutral"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "铁血丹心.mp3",
+        bgm_group="opening",
         background_top=(52, 47, 67),
         background_bottom=(15, 13, 24),
         accent=(242, 220, 173),
@@ -177,7 +190,8 @@ SCENES: list[SceneSpec] = [
             LineSpec("ning", "那就不走门，后井有条旧水道，能通到灯市边上的染坊。", "skeptical"),
             LineSpec("lu", "你在前探路，我背令匣走井道。今夜谁也别回头。", "serious"),
         ),
-        bgm_path=ROOT_DIR / "assets" / "bgm" / "男儿当自强.mp3",
+        bgm_path=ROOT_DIR / "assets" / "bgm" / "铁血丹心.mp3",
+        bgm_group="opening",
         background_top=(219, 203, 170),
         background_bottom=(149, 113, 73),
         accent=(121, 70, 34),
@@ -197,7 +211,8 @@ SCENES: list[SceneSpec] = [
             LineSpec("ning", "越热闹越好，他们盯着我手里的假货，才看不见你背后的真匣。", "smile"),
             LineSpec("lu", "换完就走，灯一灭，整条街都会变成他们的网。", "focused"),
         ),
-        bgm_path=ROOT_DIR / "assets" / "bgm" / "历史的天空-古筝-三国演义片尾曲.mp3",
+        bgm_path=ROOT_DIR / "assets" / "bgm" / "铁血丹心.mp3",
+        bgm_group="opening",
         background_top=(203, 178, 143),
         background_bottom=(108, 79, 56),
         accent=(248, 230, 204),
@@ -218,6 +233,7 @@ SCENES: list[SceneSpec] = [
             LineSpec("ning", "右边墙头有空档，我扔火粉逼他抬头，你借势出拳。", "focused", "跑"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "最后之战-热血-卢冠廷.mp3",
+        bgm_group="rain_fight",
         background_top=(57, 76, 107),
         background_bottom=(12, 16, 27),
         accent=(206, 228, 255),
@@ -241,7 +257,8 @@ SCENES: list[SceneSpec] = [
             LineSpec("han", "码头外沿多了军中暗哨，能调得动他们的人，只能是叶藏锋。", "serious"),
             LineSpec("lu", "那就顺着这条线往前查，今夜先活下来，明夜再拔他的根。", "pained"),
         ),
-        bgm_path=ROOT_DIR / "assets" / "bgm" / "思君黯然-天龙八部-悲伤.mp3",
+        bgm_path=ROOT_DIR / "assets" / "bgm" / "最后之战-热血-卢冠廷.mp3",
+        bgm_group="rain_fight",
         background_top=(70, 59, 62),
         background_bottom=(22, 18, 24),
         accent=(255, 201, 166),
@@ -282,6 +299,7 @@ SCENES: list[SceneSpec] = [
             LineSpec("lu", "很好，你带路。敢耍花样，我先折你的腿。", "angry", "拳击"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "杀破狼.mp3",
+        bgm_group="prison_escape",
         background_top=(55, 94, 64),
         background_bottom=(15, 31, 18),
         accent=(185, 235, 190),
@@ -304,7 +322,8 @@ SCENES: list[SceneSpec] = [
             LineSpec("ning", "你认清楚，是叶大人让我们来换封条。你若耽误时辰，掉脑袋的是你。", "smile"),
             LineSpec("lu", "找白鹿关仓册、调兵票底和押印名单，一页都不能漏。", "focused"),
         ),
-        bgm_path=ROOT_DIR / "assets" / "bgm" / "误入迷失森林-少年包青天.mp3",
+        bgm_path=ROOT_DIR / "assets" / "bgm" / "杀破狼.mp3",
+        bgm_group="prison_escape",
         background_top=(52, 61, 84),
         background_bottom=(15, 18, 33),
         accent=(224, 236, 250),
@@ -324,7 +343,8 @@ SCENES: list[SceneSpec] = [
             LineSpec("qin", "仓门机括图在我脑子里，只要你们带我出去，我就能开白鹿关北门。", "serious"),
             LineSpec("lu", "先跟我杀出去，到了外头，你再把这笔旧账一条条说清。", "angry", "舞剑"),
         ),
-        bgm_path=ROOT_DIR / "assets" / "bgm" / "最后之战-热血-卢冠廷.mp3",
+        bgm_path=ROOT_DIR / "assets" / "bgm" / "杀破狼.mp3",
+        bgm_group="prison_escape",
         background_top=(71, 35, 28),
         background_bottom=(18, 9, 12),
         accent=(255, 208, 184),
@@ -348,6 +368,7 @@ SCENES: list[SceneSpec] = [
             LineSpec("lu", "一直翻到城西鼓楼，到了暗河口再分开换气。", "angry", "跑"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "杀破狼.mp3",
+        bgm_group="prison_escape",
         background_top=(27, 36, 61),
         background_bottom=(7, 8, 18),
         accent=(208, 226, 255),
@@ -410,7 +431,8 @@ SCENES: list[SceneSpec] = [
             LineSpec("ning", "你敢堵在这里，说明叶藏锋还没拿到令箭，他比你更急。", "focused"),
             LineSpec("lu", "那我就先拿你的命，去换他今晚的胆寒。", "angry", "拳击"),
         ),
-        bgm_path=ROOT_DIR / "assets" / "bgm" / "男儿当自强.mp3",
+        bgm_path=ROOT_DIR / "assets" / "bgm" / "杀破狼.mp3",
+        bgm_group="siege_arc",
         background_top=(174, 184, 198),
         background_bottom=(92, 102, 118),
         accent=(255, 234, 204),
@@ -433,7 +455,8 @@ SCENES: list[SceneSpec] = [
             LineSpec("han", "卷册能烧，押印人和仓门图却在我们手里。你越急，越像做贼。", "focused"),
             LineSpec("ning", "火光照得满城都能看见，你这一烧，是替我们把人都喊醒了。", "angry"),
         ),
-        bgm_path=ROOT_DIR / "assets" / "bgm" / "暗夜浮香-天龙八部背景乐-悲伤.mp3",
+        bgm_path=ROOT_DIR / "assets" / "bgm" / "杀破狼.mp3",
+        bgm_group="siege_arc",
         background_top=(96, 32, 24),
         background_bottom=(22, 8, 10),
         accent=(255, 190, 146),
@@ -496,7 +519,8 @@ SCENES: list[SceneSpec] = [
             LineSpec("lu", "今夜把令箭、仓册、人证和你的口供一并送上关楼，他就再也赖不掉。", "serious"),
             LineSpec("ning", "旧案埋得再深，只要见了天光，就会自己喊冤。", "focused"),
         ),
-        bgm_path=ROOT_DIR / "assets" / "bgm" / "仙剑情缘.mp3",
+        bgm_path=ROOT_DIR / "assets" / "bgm" / "铁血丹心.mp3",
+        bgm_group="finale",
         background_top=(58, 62, 89),
         background_bottom=(17, 20, 35),
         accent=(225, 221, 255),
@@ -516,7 +540,8 @@ SCENES: list[SceneSpec] = [
             LineSpec("ning", "你若再迟半刻，明早开仓的人就会发现军械全成了废铁。", "angry"),
             LineSpec("lu", "后面追兵已到，你是守规矩，还是守白鹿关，今夜就得选。", "angry"),
         ),
-        bgm_path=ROOT_DIR / "assets" / "bgm" / "观音降临-高潮版.mp3",
+        bgm_path=ROOT_DIR / "assets" / "bgm" / "铁血丹心.mp3",
+        bgm_group="finale",
         background_top=(88, 103, 124),
         background_bottom=(27, 34, 49),
         accent=(251, 240, 204),
@@ -536,7 +561,8 @@ SCENES: list[SceneSpec] = [
             LineSpec("yuan", "你去夺令匣，我来打碎他的骨头。", "angry", "拳击"),
             LineSpec("lu", "你们要的是整座关城，我要的只是让所有人看清你们的脸。", "angry", "舞剑"),
         ),
-        bgm_path=ROOT_DIR / "assets" / "bgm" / "最后之战-热血-卢冠廷.mp3",
+        bgm_path=ROOT_DIR / "assets" / "bgm" / "铁血丹心.mp3",
+        bgm_group="finale",
         background_top=(108, 30, 28),
         background_bottom=(20, 8, 10),
         accent=(255, 222, 206),
@@ -561,6 +587,7 @@ SCENES: list[SceneSpec] = [
             LineSpec("lu", "关门守住了，命也守住了。接下来，该把那些躲在城里的名字一个个挖出来。", "neutral"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "铁血丹心.mp3",
+        bgm_group="finale",
         background_top=(163, 177, 204),
         background_bottom=(81, 100, 131),
         accent=(255, 242, 210),
@@ -590,87 +617,6 @@ def _ffprobe_duration(path: Path) -> float:
     return max(0.0, float((result.stdout or "0").strip() or 0.0))
 
 
-@lru_cache(maxsize=16)
-def _font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(str(FONT_BOLD if bold else FONT_REGULAR), size=size)
-
-
-def _render_scale() -> float:
-    return poseviz.render_scale_for_size(WIDTH, HEIGHT)
-
-
-def _ui_scale() -> float:
-    return max(0.66, _render_scale() * 0.92)
-
-
-def _ui_px(value: int) -> int:
-    return max(1, int(round(value * _ui_scale())))
-
-
-def _ui_font_px(value: int) -> int:
-    return max(10, _ui_px(value) - 2)
-
-
-def _actor_layout_scale() -> float:
-    return 0.78 + 0.22 * _render_scale()
-
-
-def _height_relative(value: float) -> float:
-    return value / DEFAULT_HEIGHT * HEIGHT
-
-
-@lru_cache(maxsize=64)
-def _effect_path(effect_name: str) -> Path | None:
-    assets = {
-        "电闪雷鸣": ROOT_DIR / "assets" / "effects" / "电闪雷鸣.gif",
-        "风起云涌": ROOT_DIR / "assets" / "effects" / "风起云涌.gif",
-        "命中特效": ROOT_DIR / "assets" / "effects" / "命中特效.gif",
-        "银河旋转特效": ROOT_DIR / "assets" / "effects" / "银河旋转特效.gif",
-        "熊熊大火": ROOT_DIR / "assets" / "effects" / "熊熊大火.gif",
-        "爆炸特效": ROOT_DIR / "assets" / "effects" / "爆炸特效.webp",
-        "启动大招特效": ROOT_DIR / "assets" / "effects" / "启动大招特效.webp",
-        "夕阳武士": ROOT_DIR / "assets" / "effects" / "夕阳武士.gif",
-    }
-    path = assets.get(effect_name)
-    if path and path.exists():
-        return path
-    return None
-
-
-@lru_cache(maxsize=64)
-def _effect_frames(effect_name: str) -> tuple[Image.Image, ...]:
-    path = _effect_path(effect_name)
-    if path is None:
-        return tuple()
-    with Image.open(path) as image:
-        total = max(1, int(getattr(image, "n_frames", 1)))
-        frames: list[Image.Image] = []
-        for index in range(total):
-            image.seek(index)
-            frame = image.convert("RGBA")
-            if frame.size != (WIDTH, HEIGHT):
-                frames.append(frame.copy())
-            else:
-                frames.append(frame.copy())
-        return tuple(frames)
-
-
-def _wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
-    lines: list[str] = []
-    current = ""
-    for ch in text:
-        trial = current + ch
-        width = font.getbbox(trial)[2] - font.getbbox(trial)[0]
-        if current and width > max_width:
-            lines.append(current)
-            current = ch
-        else:
-            current = trial
-    if current:
-        lines.append(current)
-    return lines or [text]
-
-
 @lru_cache(maxsize=64)
 def _track(track_name: str) -> poseviz.PoseTrack:
     return poseviz._load_track(poseviz.POSE_DIR / f"{track_name}.pose.json", width=WIDTH, height=HEIGHT)
@@ -681,58 +627,105 @@ def _has_track(track_name: str) -> bool:
     return (poseviz.POSE_DIR / f"{track_name}.pose.json").exists()
 
 
-@lru_cache(maxsize=32)
-def _textures(character_id: str) -> poseviz.TexturePack:
-    return poseviz._load_texture_pack(character_id)
+@lru_cache(maxsize=64)
+def _available_expressions(character_id: str) -> tuple[str, ...]:
+    skins_dir = poseviz.CHARACTER_DIR / character_id / "skins"
+    if not skins_dir.exists():
+        return ("default", "neutral")
+    names: set[str] = set()
+    for path in skins_dir.glob("face_*.png"):
+        stem = path.stem
+        if stem.startswith("face_talk_"):
+            continue
+        if stem in {"face_default", "face_neutral_open", "face_neutral_closed"}:
+            continue
+        names.add(stem.removeprefix("face_"))
+    if "default" not in names:
+        names.add("default")
+    return tuple(sorted(names))
 
 
-def _all_head_size() -> int:
-    values = [_track(actor.track_name).head_size for scene in SCENES for actor in scene.actors]
-    scale = _render_scale()
-    min_head = max(28, int(round(62 * scale)))
-    max_head = max(min_head + 8, int(round(80 * scale)))
-    base = int(round(sum(values) / len(values) * 0.82))
-    return max(min_head, min(max_head, base))
+def _resolve_expression(character_id: str, requested: str) -> str:
+    available = set(_available_expressions(character_id))
+    normalized = (requested or "default").strip().lower().replace("-", "_")
+    aliases: dict[str, tuple[str, ...]] = {
+        "serious": ("thinking", "skeptical", "neutral", "default"),
+        "focused": ("thinking", "skeptical", "neutral", "default"),
+        "skeptical": ("skeptical", "thinking", "neutral", "default"),
+        "nervous": ("sad", "skeptical", "neutral", "default"),
+        "pained": ("sad", "angry", "neutral", "default"),
+        "shocked": ("excited", "skeptical", "neutral", "default"),
+        "surprised": ("excited", "skeptical", "neutral", "default"),
+        "excited": ("excited", "smile", "neutral", "default"),
+        "smile": ("smile", "neutral", "default"),
+        "sad": ("sad", "neutral", "default"),
+        "angry": ("angry", "skeptical", "neutral", "default"),
+        "thinking": ("thinking", "skeptical", "neutral", "default"),
+        "neutral": ("neutral", "default"),
+        "default": ("default", "neutral"),
+    }
+    for candidate in aliases.get(normalized, (normalized, "neutral", "default")):
+        if candidate in available:
+            return candidate
+    return "default"
 
+
+def _reaction_expression(actor: ActorSpec, driver_expression: str) -> str:
+    normalized = (driver_expression or "default").strip().lower().replace("-", "_")
+    if normalized in {"angry"}:
+        requested = "skeptical"
+    elif normalized in {"pained", "sad", "nervous"}:
+        requested = "sad"
+    elif normalized in {"excited", "smile"}:
+        requested = "smile"
+    elif normalized in {"focused", "serious", "thinking"}:
+        requested = "thinking"
+    else:
+        requested = actor.expression
+    return _resolve_expression(actor.character_id, requested)
+
+
+def _ambient_expression_sequence(actor: ActorSpec) -> tuple[str, ...]:
+    available = set(_available_expressions(actor.character_id))
+    base = _resolve_expression(actor.character_id, actor.expression)
+    candidates: list[str] = [base]
+    for name in ("neutral", "thinking", "skeptical", "smile", "sad", "angry", "excited", "default"):
+        resolved = _resolve_expression(actor.character_id, name)
+        if resolved not in candidates:
+            candidates.append(resolved)
+    filtered = tuple(name for name in candidates if name in available or name == "default")
+    return filtered or (base,)
+
+
+def _expression_cycle_jitter(actor: ActorSpec, step: int) -> float:
+    seed = sum(ord(ch) for ch in f"{actor.actor_id}:{actor.character_id}") * 0.017
+    phase = seed + step * 1.61803398875
+    return math.sin(phase) * 0.42 + math.cos(phase * 0.73) * 0.18
 
 def _set_render_profile(*, fast: bool = False, fast2: bool = False, fast3: bool = False) -> int:
-    global WIDTH, HEIGHT, GROUND_Y, EFFECT_DENSITY, TMP_DIR, RENDER_PROFILE
+    global WIDTH, HEIGHT, TMP_DIR
     if fast3:
         WIDTH = FAST3_WIDTH
         HEIGHT = FAST3_HEIGHT
-        EFFECT_DENSITY = 0.52
         TMP_DIR = TMP_ROOT / "fast3"
         fps = FAST3_FPS
-        RENDER_PROFILE = "fast3"
     elif fast2:
         WIDTH = FAST2_WIDTH
         HEIGHT = FAST2_HEIGHT
-        EFFECT_DENSITY = 0.45
         TMP_DIR = TMP_ROOT / "fast2"
         fps = FAST2_FPS
-        RENDER_PROFILE = "fast2"
     elif fast:
         WIDTH = FAST_WIDTH
         HEIGHT = FAST_HEIGHT
-        EFFECT_DENSITY = 0.72
         TMP_DIR = TMP_ROOT / "fast"
         fps = FAST_FPS
-        RENDER_PROFILE = "fast"
     else:
         WIDTH = DEFAULT_WIDTH
         HEIGHT = DEFAULT_HEIGHT
-        EFFECT_DENSITY = 1.0
         TMP_DIR = TMP_ROOT / "normal"
         fps = DEFAULT_FPS
-        RENDER_PROFILE = "normal"
-    GROUND_Y = HEIGHT * 0.82
     _track.cache_clear()
-    _effect_frames.cache_clear()
     return fps
-
-
-def _scaled_effect_count(base: int) -> int:
-    return max(1, int(round(base * EFFECT_DENSITY)))
 
 
 def _default_idle_track(actor: ActorSpec, requested: str) -> str:
@@ -786,6 +779,208 @@ def _scene_paths(scene: SceneSpec) -> dict[str, Path]:
     }
 
 
+def _bgm_chain_key(scene: SceneSpec) -> tuple[str | None, Path]:
+    return (scene.bgm_group or scene.scene_id, scene.bgm_path.resolve())
+
+
+def _rgba01(rgb: tuple[int, int, int], alpha: float = 1.0) -> tuple[float, float, float, float]:
+    return (rgb[0] / 255.0, rgb[1] / 255.0, rgb[2] / 255.0, alpha)
+
+
+def _panda_background_id(scene: SceneSpec) -> str:
+    title = scene.title
+    if scene.effect == "rain":
+        return "night-bridge" if "night-bridge" in BACKGROUND_IDS else "shop-row"
+    if any(token in title for token in ("库", "案", "卷", "阁", "厅", "堂", "庄", "义庄")):
+        return "town-hall-records" if "town-hall-records" in BACKGROUND_IDS else "inn-hall"
+    if any(token in title for token in ("巷", "市", "街", "门", "桥", "关", "坡")):
+        return "shop-row" if "shop-row" in BACKGROUND_IDS else "street-day"
+    if scene.effect in {"embers", "fire", "burst"}:
+        return "mountain-cliff" if "mountain-cliff" in BACKGROUND_IDS else "temple-courtyard"
+    return "temple-courtyard" if "temple-courtyard" in BACKGROUND_IDS else next(iter(BACKGROUND_IDS))
+
+
+def _panda_effect_items(scene: SceneSpec, duration_s: float) -> list[dict[str, object]]:
+    effect_spec = EFFECT_ASSET_MAP.get(scene.effect)
+    if effect_spec is None:
+        return []
+    effect_name, _, alpha = effect_spec
+    asset_path = resolve_effect_asset(effect_name)
+    if asset_path is None:
+        return []
+    duration_ms = max(1, int(round(duration_s * 1000)))
+    effect_duration_ms = int(round(EFFECT_ONE_SHOT_DURATION_S.get(scene.effect, 1.4) * 1000))
+    items: list[dict[str, object]] = []
+    for start_s in _effect_trigger_times(scene, duration_s):
+        start_ms = max(0, int(round(start_s * 1000)))
+        end_ms = min(duration_ms, start_ms + effect_duration_ms)
+        items.append(
+            {
+                "type": scene.effect,
+                "asset_path": str(asset_path),
+                "alpha": alpha,
+                "start_ms": start_ms,
+                "end_ms": max(start_ms + 1, end_ms),
+                "playback_speed": EFFECT_PLAYBACK_RATE,
+            }
+        )
+    return items
+
+
+def _panda_expression_items(
+    scene: SceneSpec,
+    expression_cues: tuple[ScheduledExpressionCue, ...],
+    duration_s: float,
+) -> list[dict[str, object]]:
+    duration_ms = int(round(duration_s * 1000))
+    items: list[dict[str, object]] = []
+    for actor in scene.actors:
+        actor_cues = [cue for cue in expression_cues if cue.actor_id == actor.actor_id]
+        if not actor_cues:
+            continue
+        for index, cue in enumerate(actor_cues):
+            start_ms = max(0, int(round(cue.start_s * 1000)))
+            next_start_ms = duration_ms
+            if index + 1 < len(actor_cues):
+                next_start_ms = max(start_ms + 1, int(round(actor_cues[index + 1].start_s * 1000)))
+            items.append(
+                {
+                    "actor_id": actor.actor_id,
+                    "expression": cue.expression,
+                    "start_ms": start_ms,
+                    "end_ms": max(start_ms + 1, next_start_ms - 1),
+                }
+            )
+    return items
+
+
+def _panda_dialogue_items(schedule: list[ScheduledLine]) -> list[dict[str, object]]:
+    return [
+        {
+            "speaker_id": item.speaker_id,
+            "text": item.text,
+            "subtitle": item.text,
+            "start_ms": int(round(item.start_s * 1000)),
+            "end_ms": int(round(item.end_s * 1000)),
+        }
+        for item in schedule
+    ]
+
+
+def _panda_beat_items(scene: SceneSpec, schedule: list[ScheduledLine], duration_s: float) -> list[dict[str, object]]:
+    duration_ms = int(round(duration_s * 1000))
+    beats: list[dict[str, object]] = []
+    actor_map = {actor.actor_id: actor for actor in scene.actors}
+    for item in schedule:
+        actor = actor_map[item.speaker_id]
+        facing = "left" if actor.mirror else "right"
+        track_name = item.track_name or actor.track_name
+        if _has_track(track_name):
+            beats.append(
+                {
+                    "actor_id": actor.actor_id,
+                    "start_ms": int(round(item.start_s * 1000)),
+                    "end_ms": int(round(item.end_s * 1000)),
+                    "motion": "pose",
+                    "facing": facing,
+                    "pose_track_path": str((poseviz.POSE_DIR / f"{track_name}.pose.json").resolve()),
+                }
+            )
+    for actor in scene.actors:
+        facing = "left" if actor.mirror else "right"
+        idle_track = _default_idle_track(actor, actor.track_name)
+        if _has_track(idle_track):
+            beats.append(
+                {
+                    "actor_id": actor.actor_id,
+                    "start_ms": 0,
+                    "end_ms": duration_ms,
+                    "motion": "pose",
+                    "facing": facing,
+                    "pose_track_path": str((poseviz.POSE_DIR / f"{idle_track}.pose.json").resolve()),
+                }
+            )
+    return beats
+
+
+def _panda_actor_items(scene: SceneSpec) -> list[dict[str, object]]:
+    actors: list[dict[str, object]] = []
+    for actor in scene.actors:
+        if not actor.visible:
+            continue
+        actors.append(
+            {
+                "actor_id": actor.actor_id,
+                "scale": max(0.72, actor.scale * 0.82),
+                "facing": "left" if actor.mirror else "right",
+                "layer": "front",
+                "spawn": {
+                    "x": max(-3.2, min(3.2, actor.x_offset / 95.0)),
+                    "z": 0.0,
+                },
+            }
+        )
+    return actors
+
+
+def _panda_scene_dict(
+    scene: SceneSpec,
+    schedule: list[ScheduledLine],
+    expression_cues: tuple[ScheduledExpressionCue, ...],
+    duration_s: float,
+) -> dict[str, object]:
+    background_id = _panda_background_id(scene)
+    return {
+        "id": scene.scene_id,
+        "background": background_id,
+        "duration_ms": int(round(duration_s * 1000)),
+        "actors": _panda_actor_items(scene),
+        "dialogues": _panda_dialogue_items(schedule),
+        "expressions": _panda_expression_items(scene, expression_cues, duration_s),
+        "beats": _panda_beat_items(scene, schedule, duration_s),
+        "effects": _panda_effect_items(scene, duration_s),
+        "box": {
+            "width": 12.0,
+            "height": 7.0,
+            "depth": 7.5,
+            "back_wall_color": _rgba01(scene.background_top, 1.0),
+            "left_wall_color": _rgba01(scene.background_bottom, 1.0),
+            "right_wall_color": _rgba01(scene.background_bottom, 1.0),
+            "floor_color": _rgba01(tuple(max(0, int(channel * 0.72)) for channel in scene.background_bottom), 1.0),
+            "ceiling_color": _rgba01(tuple(min(255, int(channel * 1.04)) for channel in scene.background_top), 1.0),
+        },
+        "camera": {
+            "x": 0.0,
+            "z": 0.2,
+            "zoom": 1.42,
+        },
+    }
+
+
+def _build_panda_story(*, fast: bool, fast2: bool, fast3: bool) -> dict[str, object]:
+    cast_map: dict[str, dict[str, object]] = {}
+    for scene in SCENES:
+        for actor in scene.actors:
+            cast_map.setdefault(
+                actor.actor_id,
+                {
+                    "id": actor.actor_id,
+                    "display_name": actor.label,
+                    "asset_id": actor.character_id,
+                },
+            )
+    return {
+        "video": {
+            "width": WIDTH,
+            "height": HEIGHT,
+            "renderer": "panda_card_fast" if (fast or fast2 or fast3) else "true_3d",
+            "speed_mode": "extreme" if fast3 else ("fast" if (fast or fast2) else "normal"),
+            "show_actor_labels": False,
+        },
+        "cast": list(cast_map.values()),
+    }
+
+
 def _build_schedule(scene: SceneSpec, scene_dir: Path, *, refresh_tts: bool = False) -> tuple[list[ScheduledLine], float]:
     actor_map = {actor.actor_id: actor for actor in scene.actors}
     schedule: list[ScheduledLine] = []
@@ -814,7 +1009,71 @@ def _build_schedule(scene: SceneSpec, scene_dir: Path, *, refresh_tts: bool = Fa
     return schedule, scene_duration
 
 
-def _mix_scene_audio(scene: SceneSpec, schedule: list[ScheduledLine], duration_s: float, output_path: Path) -> None:
+def _build_expression_schedule(scene: SceneSpec, schedule: list[ScheduledLine], duration_s: float) -> tuple[ScheduledExpressionCue, ...]:
+    cues: list[ScheduledExpressionCue] = []
+    actor_map = {actor.actor_id: actor for actor in scene.actors}
+    for actor in scene.actors:
+        cues.append(ScheduledExpressionCue(actor.actor_id, 0.0, _resolve_expression(actor.character_id, actor.expression), 0))
+        sequence = _ambient_expression_sequence(actor)
+        if len(sequence) > 1:
+            total_steps = max(0, int(duration_s // EXPRESSION_CYCLE_S))
+            base_offset = (abs(actor.x_offset) / max(1, WIDTH)) * 0.9
+            for step in range(1, total_steps + 1):
+                jitter = _expression_cycle_jitter(actor, step)
+                start_s = min(duration_s, max(0.0, step * EXPRESSION_CYCLE_S + base_offset + jitter))
+                expression = sequence[step % len(sequence)]
+                cues.append(ScheduledExpressionCue(actor.actor_id, start_s, expression, 120 + step))
+    for index, line in enumerate(schedule, start=1):
+        speaker = actor_map[line.speaker_id]
+        cues.append(
+            ScheduledExpressionCue(
+                line.speaker_id,
+                line.start_s,
+                _resolve_expression(speaker.character_id, line.expression),
+                1000 + index,
+            )
+        )
+        for actor in scene.actors:
+            if actor.actor_id == line.speaker_id:
+                continue
+            cues.append(
+                ScheduledExpressionCue(
+                    actor.actor_id,
+                    line.start_s + 0.06,
+                    _reaction_expression(actor, line.expression),
+                    500 + index,
+                )
+            )
+    for index, cue in enumerate(scene.expression_cues, start=1):
+        actor = actor_map[cue.actor_id]
+        cues.append(
+            ScheduledExpressionCue(
+                cue.actor_id,
+                max(0.0, cue.start_s),
+                _resolve_expression(actor.character_id, cue.expression),
+                2000 + index,
+            )
+        )
+    return tuple(sorted(cues, key=lambda item: (item.start_s, item.priority)))
+
+
+def _expression_at_time(
+    actor_id: str,
+    t_s: float,
+    cues: tuple[ScheduledExpressionCue, ...],
+    default_expression: str,
+) -> str:
+    expression = default_expression
+    for cue in cues:
+        if cue.actor_id != actor_id:
+            continue
+        if cue.start_s > t_s:
+            break
+        expression = cue.expression
+    return expression
+
+
+def _mix_scene_audio(scene: SceneSpec, schedule: list[ScheduledLine], duration_s: float, output_path: Path, *, bgm_offset_s: float = 0.0) -> None:
     ffmpeg = _ffmpeg()
     command = [ffmpeg, "-y", "-stream_loop", "-1", "-i", str(scene.bgm_path)]
     for line in schedule:
@@ -822,7 +1081,8 @@ def _mix_scene_audio(scene: SceneSpec, schedule: list[ScheduledLine], duration_s
     for cue in scene.sfx:
         command.extend(["-i", str(cue.path)])
 
-    filters = [f"[0:a]atrim=0:{duration_s:.3f},asetpts=N/SR/TB,volume=0.16[bgm]"]
+    bgm_end_s = bgm_offset_s + duration_s
+    filters = [f"[0:a]atrim={bgm_offset_s:.3f}:{bgm_end_s:.3f},asetpts=N/SR/TB,volume=0.16[bgm]"]
     mix_inputs = ["[bgm]"]
     for index, line in enumerate(schedule, start=1):
         delay_ms = int(line.start_s * 1000)
@@ -835,7 +1095,11 @@ def _mix_scene_audio(scene: SceneSpec, schedule: list[ScheduledLine], duration_s
         delay_ms = int(cue.offset_s * 1000)
         filters.append(f"[{cue_index}:a]adelay={delay_ms}|{delay_ms},volume={cue.volume:.3f}[{label}]")
         mix_inputs.append(f"[{label}]")
-    filters.append(f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)},alimiter=limit=0.92[aout]")
+    filters.append(
+        f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)},"
+        "loudnorm=I=-16:LRA=7:TP=-1.5:linear=true,"
+        "alimiter=limit=0.92[aout]"
+    )
     command.extend(
         [
             "-filter_complex",
@@ -852,14 +1116,6 @@ def _mix_scene_audio(scene: SceneSpec, schedule: list[ScheduledLine], duration_s
         ]
     )
     subprocess.run(command, check=True)
-
-
-def _gradient_background(image: Image.Image, top: tuple[int, int, int], bottom: tuple[int, int, int]) -> None:
-    draw = ImageDraw.Draw(image)
-    for y in range(image.height):
-        alpha = y / max(1, image.height - 1)
-        color = tuple(int(top[i] * (1.0 - alpha) + bottom[i] * alpha) for i in range(3))
-        draw.line((0, y, image.width, y), fill=color, width=1)
 
 
 def _effect_trigger_times(scene: SceneSpec, duration_s: float) -> tuple[float, ...]:
@@ -879,249 +1135,14 @@ def _effect_trigger_times(scene: SceneSpec, duration_s: float) -> tuple[float, .
         if not deduped or abs(start_s - deduped[-1]) > 0.08:
             deduped.append(start_s)
     return tuple(deduped)
-
-
-def _draw_effect(image: Image.Image, draw: ImageDraw.ImageDraw, scene: SceneSpec, t_s: float, duration_s: float) -> None:
-    if EFFECT_DENSITY <= 0.0:
-        return
-    effect_spec = EFFECT_ASSET_MAP.get(scene.effect)
-    if effect_spec is None:
-        return
-    effect_name, box_ratio, alpha = effect_spec
-    frames = _effect_frames(effect_name)
-    if not frames:
-        return
-    effect_duration = EFFECT_ONE_SHOT_DURATION_S.get(scene.effect, 1.4)
-    active_start_s: float | None = None
-    for start_s in _effect_trigger_times(scene, duration_s):
-        end_s = min(duration_s, start_s + effect_duration)
-        if start_s <= t_s <= end_s:
-            active_start_s = start_s
-            active_end_s = max(start_s + 0.001, end_s)
-            break
-    if active_start_s is None:
-        return
-    local_progress = (t_s - active_start_s) / max(0.001, active_end_s - active_start_s)
-    effect_progress = max(0.0, min(1.0, local_progress * EFFECT_PLAYBACK_RATE))
-    frame_index = min(len(frames) - 1, int(effect_progress * len(frames)))
-    frame = frames[frame_index].copy()
-    target_alpha = int(round(EFFECT_ALPHA_MIN + (EFFECT_ALPHA_MAX - EFFECT_ALPHA_MIN) * max(0.0, min(1.0, alpha))))
-    channel = frame.getchannel("A").point(
-        lambda value: 0 if value <= 0 else max(EFFECT_ALPHA_MIN, min(EFFECT_ALPHA_MAX, int(round(value * target_alpha / 255.0))))
-    )
-    frame.putalpha(channel)
-    x = int(round(box_ratio[0] * WIDTH))
-    y = int(round(box_ratio[1] * HEIGHT))
-    w = max(4, int(round(box_ratio[2] * WIDTH)))
-    h = max(4, int(round(box_ratio[3] * HEIGHT)))
-    frame = frame.resize((w, h), Image.Resampling.LANCZOS)
-    image.alpha_composite(frame, (x, y))
-
-
-def _draw_caption(draw: ImageDraw.ImageDraw, scene: SceneSpec, progress: float) -> None:
-    title_font = _font(_ui_font_px(26), bold=True)
-    scene_font = _font(_ui_font_px(22), bold=True)
-    x0 = _ui_px(28)
-    y0 = _ui_px(24)
-    x1 = _ui_px(470)
-    y1 = _ui_px(126)
-    draw.rounded_rectangle((x0, y0, x1, y1), radius=_ui_px(20), fill=(14, 18, 28, 208))
-    draw.text((_ui_px(48), _ui_px(42)), TITLE, fill=(248, 244, 235), font=title_font)
-    draw.text((_ui_px(48), _ui_px(78)), f"{scene.scene_id}  {scene.title}", fill=scene.accent, font=scene_font)
-    if RENDER_PROFILE == "fast3":
-        return
-    bar_x = _ui_px(48)
-    bar_y0 = _ui_px(110)
-    bar_y1 = _ui_px(118)
-    bar_max = _ui_px(320)
-    bar_w = int(bar_max * min(1.0, max(0.0, progress)))
-    draw.rounded_rectangle((bar_x, bar_y0, bar_x + bar_max, bar_y1), radius=_ui_px(4), fill=(82, 88, 106))
-    draw.rounded_rectangle((bar_x, bar_y0, bar_x + bar_w, bar_y1), radius=_ui_px(4), fill=scene.accent)
-
-
-def _draw_subtitle(draw: ImageDraw.ImageDraw, label: str, text: str) -> None:
-    name_font = _font(_ui_font_px(24), bold=True)
-    text_font = _font(_ui_font_px(26), bold=False)
-    subtitle_margin = _ui_px(38)
-    subtitle_bottom = _ui_px(28)
-    plate_radius = _ui_px(18)
-    line_gap = _ui_px(30)
-    label_x = _ui_px(60)
-    text_offset = _ui_px(44)
-    lines = _wrap_text(f"{label}：{text}", text_font, WIDTH - subtitle_margin * 2 - _ui_px(24))
-    plate_h = _ui_px(82) + max(0, len(lines) - 1) * line_gap
-    y0 = HEIGHT - plate_h - subtitle_bottom
-    draw.rounded_rectangle((subtitle_margin, y0, WIDTH - subtitle_margin, HEIGHT - subtitle_bottom), radius=plate_radius, fill=(16, 18, 24, 220))
-    draw.text((label_x, y0 + _ui_px(18)), label, fill=(255, 226, 172), font=name_font)
-    text_y = y0 + _ui_px(18)
-    for idx, line in enumerate(lines):
-        prefix = f"{label}：" if idx == 0 else ""
-        content = line[len(prefix) :] if idx == 0 and line.startswith(prefix) else line
-        offset_x = text_offset if idx == 0 else 0
-        draw.text((label_x + offset_x, text_y), content, fill=(247, 244, 238), font=text_font)
-        text_y += line_gap
-
-
-def _render_scene_base(scene: SceneSpec) -> Image.Image:
-    image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 255))
-    _gradient_background(image, scene.background_top, scene.background_bottom)
-    draw = ImageDraw.Draw(image, "RGBA")
-    _draw_caption(draw, scene, 1.0 if RENDER_PROFILE == "fast3" else 0.0)
-    return image
-
-
-def _render_subtitle_overlay(label: str, text: str) -> Image.Image:
-    overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(overlay, "RGBA")
-    _draw_subtitle(draw, label, text)
-    return overlay
-
-
-def _active_line(schedule: list[ScheduledLine], t_s: float) -> ScheduledLine | None:
-    for item in schedule:
-        if item.start_s <= t_s <= item.end_s:
-            return item
-    return None
-
-
-def _actor_stage_points(
-    actor: ActorSpec,
-    track: poseviz.PoseTrack,
-    points: dict[str, poseviz.np.ndarray],
-) -> dict[str, tuple[float, float]]:
-    base = {name: poseviz._stage_point(track, point, width=WIDTH, height=HEIGHT) for name, point in points.items()}
-    stage: dict[str, tuple[float, float]] = {}
-    layout_scale = _actor_layout_scale()
-    actor_scale = actor.scale * layout_scale
-    actor_offset = _height_relative(actor.x_offset) * layout_scale
-    anchor_x = WIDTH * 0.5 + actor_offset
-    for name, (x, y) in base.items():
-        stage_x = WIDTH * 0.5 + (x - WIDTH * 0.5) * actor_scale + actor_offset
-        if actor.mirror:
-            stage_x = anchor_x - (stage_x - anchor_x)
-        stage_y = GROUND_Y + (y - GROUND_Y) * actor_scale
-        stage[name] = (stage_x, stage_y)
-    return stage
-
-
-def _render_actor_overlay(
-    actor: ActorSpec,
-    active: ScheduledLine | None,
-    t_s: float,
-    head_size: int,
-    fps: int,
-) -> Image.Image:
-    image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    draw_scale = _render_scale()
-    layout_scale = _actor_layout_scale()
-    limb_width = max(8, int(round(poseviz.LIMB_WIDTH * draw_scale)))
-    joint_radius = max(4, int(round(poseviz.JOINT_RADIUS * draw_scale)))
-    speaking = active is not None and active.speaker_id == actor.actor_id
-    requested_track = active.track_name if speaking and active.track_name else actor.track_name
-    track_name = requested_track if speaking else _default_idle_track(actor, requested_track)
-    track = _track(track_name)
-    if not speaking:
-        sample_t = 0.0
-    elif track_name in ACTION_TRACKS:
-        line_t = 0.0 if active is None else max(0.0, t_s - active.start_s)
-        sample_t = (line_t * 0.55) % max(track.total_duration_s, 0.001)
-    else:
-        line_t = 0.0 if active is None else max(0.0, t_s - active.start_s)
-        sample_t = min(track.total_duration_s * 0.12, line_t * 0.08)
-    points = poseviz._sample_track(track, sample_t)
-    stage_points = _actor_stage_points(actor, track, points)
-    textures = _textures(actor.character_id)
-    palette = poseviz._palette_for_character(actor.character_id)
-    draw = ImageDraw.Draw(image, "RGBA")
-    for start, end in poseviz.POSE_EDGES:
-        if start not in LEG_POINTS or start not in stage_points or end not in stage_points:
-            continue
-        draw.line((*stage_points[start], *stage_points[end]), fill=poseviz._edge_color(start, palette), width=limb_width, joint="curve")
-    for name, (x, y) in stage_points.items():
-        if name in {"nose", "left_hip", "right_hip"} or name not in LEG_POINTS:
-            continue
-        radius = joint_radius
-        color = poseviz._joint_color(name, palette)
-        draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
-    poseviz._draw_torso(draw, stage_points, palette)
-    poseviz._draw_torso_texture(image, stage_points, textures)
-    draw = ImageDraw.Draw(image, "RGBA")
-    for start, end in poseviz.POSE_EDGES:
-        if start not in ARM_POINTS or start not in stage_points or end not in stage_points:
-            continue
-        draw.line((*stage_points[start], *stage_points[end]), fill=poseviz._edge_color(start, palette), width=limb_width, joint="curve")
-    for name, (x, y) in stage_points.items():
-        if name in {"nose", "left_hip", "right_hip"} or name not in ARM_POINTS:
-            continue
-        radius = joint_radius
-        color = poseviz._joint_color(name, palette)
-        draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
-    mouth_open = speaking and (int(t_s * fps) % TALK_MOUTH_CYCLE_FRAMES) < (TALK_MOUTH_CYCLE_FRAMES // 2)
-    expression = active.expression if speaking else actor.expression
-    face_texture = poseviz._load_face_texture(actor.character_id, expression=expression, talking=speaking, mouth_open=mouth_open)
-    head_draw_size = int(head_size * actor.scale * layout_scale)
-    poseviz._draw_panda_head(image, draw, stage_points, size=head_draw_size, textures=textures, face_texture=face_texture)
-    head_center = poseviz._head_center(stage_points)
-    if head_center is not None:
-        label_font = _font(_ui_font_px(20), bold=True)
-        bubble_color = (255, 230, 172, 220) if speaking else (18, 22, 32, 188)
-        text_color = (78, 42, 20) if speaking else (240, 240, 240)
-        text_w = label_font.getbbox(actor.label)[2] - label_font.getbbox(actor.label)[0]
-        cx, _ = head_center
-        bubble_w = text_w + _ui_px(36)
-        bubble_h = _ui_px(34)
-        foot_y = max(point[1] for point in stage_points.values())
-        box_x0 = cx - bubble_w * 0.5
-        box_y0 = foot_y + _ui_px(10)
-        box_x0 = max(_ui_px(12), min(WIDTH - bubble_w - _ui_px(12), box_x0))
-        box_y0 = max(_ui_px(12), min(HEIGHT - bubble_h - _ui_px(12), box_y0))
-        box = (
-            box_x0,
-            box_y0,
-            box_x0 + bubble_w,
-            box_y0 + bubble_h,
-        )
-        draw.rounded_rectangle(box, radius=_ui_px(12), fill=bubble_color)
-        draw.text((box[0] + _ui_px(16), box[1] + _ui_px(6)), actor.label, fill=text_color, font=label_font)
-    return image
-
-
-def _draw_actor(
-    image: Image.Image,
-    actor: ActorSpec,
-    active: ScheduledLine | None,
-    t_s: float,
-    head_size: int,
-    fps: int,
-) -> None:
-    image.alpha_composite(_render_actor_overlay(actor, active, t_s, head_size, fps))
-
-
-def _render_scene_frame(scene: SceneSpec, schedule: list[ScheduledLine], duration_s: float, t_s: float, head_size: int, fps: int) -> Image.Image:
-    image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 255))
-    _gradient_background(image, scene.background_top, scene.background_bottom)
-    progress = 0.0 if duration_s <= 1e-6 else max(0.0, min(1.0, t_s / duration_s))
-    active = _active_line(schedule, t_s)
-    for actor in scene.actors:
-        if not actor.visible:
-            continue
-        _draw_actor(image, actor, active, t_s, head_size, fps)
-    draw = ImageDraw.Draw(image, "RGBA")
-    _draw_caption(draw, scene, progress)
-    if active is not None:
-        _draw_subtitle(draw, active.speaker_label, active.text)
-    draw = ImageDraw.Draw(image, "RGBA")
-    _draw_effect(image, draw, scene, t_s, duration_s)
-    return image.convert("RGB")
-
-
 def _render_scene_video(
     scene: SceneSpec,
     schedule: list[ScheduledLine],
+    expression_cues: tuple[ScheduledExpressionCue, ...],
     duration_s: float,
-    head_size: int,
     output_path: Path,
     fps: int,
+    panda_renderer: PandaTrue3DRenderer,
     *,
     fast: bool,
     fast2: bool,
@@ -1131,38 +1152,14 @@ def _render_scene_video(
     proc = poseviz._open_ffmpeg_stream(fps, WIDTH, HEIGHT, output_path, preset=preset, crf=crf)
     try:
         assert proc.stdin is not None
-        total_frames = max(1, int(round(duration_s * fps)))
-        base_frame = _render_scene_base(scene) if fast3 else None
-        static_actors = {
-            actor.actor_id: _render_actor_overlay(actor, None, 0.0, head_size, fps)
-            for actor in scene.actors
-            if actor.visible
-        } if fast3 else {}
-        subtitle_overlays = {
-            (item.speaker_label, item.text): _render_subtitle_overlay(item.speaker_label, item.text)
-            for item in schedule
-        } if fast3 else {}
+        total_frames = max(1, int(math.ceil(duration_s * fps)))
+        half_frame_s = 0.5 / max(1, fps)
+        panda_scene = _panda_scene_dict(scene, schedule, expression_cues, duration_s)
         for frame_index in range(total_frames):
-            t_s = frame_index / fps
-            if fast3:
-                frame = base_frame.copy()
-                progress = 0.0 if duration_s <= 1e-6 else max(0.0, min(1.0, t_s / duration_s))
-                active = _active_line(schedule, t_s)
-                for actor in scene.actors:
-                    if not actor.visible:
-                        continue
-                    if active is not None and active.speaker_id == actor.actor_id:
-                        frame.alpha_composite(_render_actor_overlay(actor, active, t_s, head_size, fps))
-                    else:
-                        frame.alpha_composite(static_actors[actor.actor_id])
-                if active is not None:
-                    frame.alpha_composite(subtitle_overlays[(active.speaker_label, active.text)])
-                draw = ImageDraw.Draw(frame, "RGBA")
-                _draw_effect(frame, draw, scene, t_s, duration_s)
-                proc.stdin.write(frame.convert("RGB").tobytes())
-            else:
-                frame = _render_scene_frame(scene, schedule, duration_s, t_s, head_size, fps)
-                proc.stdin.write(frame.tobytes())
+            # Sample slightly ahead of the frame boundary so visual events do not lag behind audio at low FPS.
+            t_s = min(duration_s, frame_index / fps + half_frame_s)
+            frame_rgb = panda_renderer.capture_scene_frame(panda_scene, int(round(t_s * 1000)), raw_rgb=True)
+            proc.stdin.write(frame_rgb)
     finally:
         if proc.stdin is not None:
             proc.stdin.close()
@@ -1193,12 +1190,21 @@ def _mux_scene(video_path: Path, audio_path: Path, output_path: Path) -> None:
     )
 
 
-def _concat_scenes(scene_files: list[Path], output_path: Path) -> None:
+def _concat_scenes(
+    scene_files: list[Path],
+    output_path: Path,
+    *,
+    fps: int,
+    fast: bool = False,
+    fast2: bool = False,
+    fast3: bool = False,
+) -> None:
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", suffix=".txt", delete=False, dir=str(TMP_DIR)) as handle:
         for path in scene_files:
             handle.write(f"file '{path.resolve()}'\n")
         concat_list = Path(handle.name)
     try:
+        preset, crf = poseviz._encoding_profile(fast=fast, fast2=fast2, fast3=fast3)
         subprocess.run(
             [
                 _ffmpeg(),
@@ -1209,8 +1215,24 @@ def _concat_scenes(scene_files: list[Path], output_path: Path) -> None:
                 "0",
                 "-i",
                 str(concat_list),
-                "-c",
-                "copy",
+                "-vsync",
+                "cfr",
+                "-r",
+                str(fps),
+                "-c:v",
+                "libx264",
+                "-preset",
+                preset,
+                "-crf",
+                str(crf),
+                "-pix_fmt",
+                "yuv420p",
+                "-c:a",
+                "aac",
+                "-b:a",
+                "128k",
+                "-af",
+                "aresample=async=1:first_pts=0",
                 str(output_path),
             ],
             check=True,
@@ -1222,8 +1244,10 @@ def _concat_scenes(scene_files: list[Path], output_path: Path) -> None:
 def render_story(output_path: Path, *, force: bool = False, fast: bool = False, fast2: bool = False, fast3: bool = False) -> None:
     fps = _set_render_profile(fast=fast, fast2=fast2, fast3=fast3)
     TMP_DIR.mkdir(parents=True, exist_ok=True)
-    head_size = _all_head_size()
+    panda_renderer = PandaTrue3DRenderer(_build_panda_story(fast=fast, fast2=fast2, fast3=fast3), prefer_gpu=True)
     scene_outputs: list[Path] = []
+    current_bgm_key: tuple[str | None, Path] | None = None
+    current_bgm_offset_s = 0.0
     for scene in SCENES:
         paths = _scene_paths(scene)
         if not force and paths["scene_mp4"].exists() and paths["scene_mp4"].stat().st_size > 0:
@@ -1231,12 +1255,31 @@ def render_story(output_path: Path, *, force: bool = False, fast: bool = False, 
             print(paths["scene_mp4"])
             continue
         schedule, duration_s = _build_schedule(scene, paths["dir"], refresh_tts=force)
-        _mix_scene_audio(scene, schedule, duration_s, paths["audio"])
-        _render_scene_video(scene, schedule, duration_s, head_size, paths["video"], fps, fast=fast, fast2=fast2, fast3=fast3)
+        expression_cues = _build_expression_schedule(scene, schedule, duration_s)
+        bgm_key = _bgm_chain_key(scene)
+        bgm_offset_s = current_bgm_offset_s if bgm_key == current_bgm_key else 0.0
+        _mix_scene_audio(scene, schedule, duration_s, paths["audio"], bgm_offset_s=bgm_offset_s)
+        _render_scene_video(
+            scene,
+            schedule,
+            expression_cues,
+            duration_s,
+            paths["video"],
+            fps,
+            panda_renderer,
+            fast=fast,
+            fast2=fast2,
+            fast3=fast3,
+        )
         _mux_scene(paths["video"], paths["audio"], paths["scene_mp4"])
         scene_outputs.append(paths["scene_mp4"])
+        if bgm_key == current_bgm_key:
+            current_bgm_offset_s += duration_s
+        else:
+            current_bgm_key = bgm_key
+            current_bgm_offset_s = duration_s
         print(paths["scene_mp4"])
-    _concat_scenes(scene_outputs, output_path)
+    _concat_scenes(scene_outputs, output_path, fps=fps, fast=fast, fast2=fast2, fast3=fast3)
     print(output_path)
 
 

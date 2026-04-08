@@ -7,12 +7,13 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Optional
 
-from PIL import Image, ImageDraw
+import generate_actions_pose_reconstruction as poseviz
+from PIL import Image, ImageChops, ImageDraw
 
 from .io import CHARACTERS_DIR, TMP_DIR, _cached_remote_asset, manifest_index
 
-MAX_EFFECT_ALPHA = 245
-MIN_EFFECT_ALPHA = 220
+MAX_EFFECT_ALPHA = 150
+MIN_EFFECT_ALPHA = 100
 PROP_WHITE_BG_VERSION = 2
 
 
@@ -122,6 +123,7 @@ class PandaTrue3DRenderer:
         self._gradient_texture_cache: dict[str, Any] = {}
         self._texture_sequence_cache: dict[str, Any] = {}
         self._frame_duration_cache: dict[str, list[int]] = {}
+        self._pose_track_cache: dict[str, Any] = {}
         self._text_font = self._load_text_font()
         self._prepared_scene_id: Optional[str] = None
         self._current_scene: Optional[dict[str, Any]] = None
@@ -131,6 +133,8 @@ class PandaTrue3DRenderer:
         self._foreground_instances: list[dict[str, Any]] = []
         self._effect_instances: list[dict[str, Any]] = []
         self._sky_prop_instances: list[dict[str, Any]] = []
+        self._last_frame_signature: Any = None
+        self._last_frame_rgb: Optional[bytes] = None
         self._build_lighting()
         self.base.render.setShaderOff()
         self.skybox_root.setShaderOff()
@@ -241,252 +245,148 @@ class PandaTrue3DRenderer:
                 return item
         return None
 
-    @staticmethod
-    def _lerp(start: float, end: float, ratio: float) -> float:
-        return start + (end - start) * max(0.0, min(1.0, ratio))
+    def _pose_track(self, path_value: str | None):
+        path = str(path_value or "").strip()
+        if not path:
+            return None
+        cached = self._pose_track_cache.get(path)
+        if cached is not None:
+            return cached
+        track = poseviz._load_track(Path(path), width=max(960, self.frame_width), height=max(540, self.frame_height))
+        self._pose_track_cache[path] = track
+        return track
 
     @staticmethod
-    def _ease_in_out(ratio: float) -> float:
-        ratio = max(0.0, min(1.0, ratio))
-        return 0.5 - 0.5 * math.cos(math.pi * ratio)
+    def _pose_head_point(points: dict[str, tuple[float, float]]) -> tuple[float, float] | None:
+        markers = [points[name] for name in ("left_eye", "right_eye", "left_ear", "right_ear") if name in points]
+        if len(markers) >= 2:
+            return (
+                sum(point[0] for point in markers) / len(markers),
+                sum(point[1] for point in markers) / len(markers),
+            )
+        if "nose" in points:
+            return points["nose"]
+        return None
 
-    @staticmethod
-    def _ease_out_cubic(ratio: float) -> float:
-        ratio = max(0.0, min(1.0, ratio))
-        return 1.0 - (1.0 - ratio) ** 3
+    def _pose_body_state(
+        self,
+        active_beat: dict[str, Any],
+        time_ms: int,
+        facing_sign: float,
+    ) -> Optional[dict[str, Any]]:
+        track = self._pose_track(active_beat.get("pose_track_path"))
+        if track is None or track.total_duration_s <= 0.0:
+            return None
+        start_ms = int(active_beat.get("start_ms", 0) or 0)
+        end_ms = max(start_ms + 1, int(active_beat.get("end_ms", start_ms + 1) or start_ms + 1))
+        ratio = max(0.0, min(1.0, (time_ms - start_ms) / max(1.0, float(end_ms - start_ms))))
+        pose_points = poseviz._sample_track(track, ratio * track.total_duration_s)
+        if not pose_points:
+            return None
+        points = {name: (float(value[0]), float(value[1])) for name, value in pose_points.items()}
+        if not {"left_shoulder", "right_shoulder", "left_hip", "right_hip"} <= set(points):
+            return None
+        left_shoulder = points["left_shoulder"]
+        right_shoulder = points["right_shoulder"]
+        left_hip = points["left_hip"]
+        right_hip = points["right_hip"]
+        shoulder_center_src = ((left_shoulder[0] + right_shoulder[0]) * 0.5, (left_shoulder[1] + right_shoulder[1]) * 0.5)
+        hip_center_src = ((left_hip[0] + right_hip[0]) * 0.5, (left_hip[1] + right_hip[1]) * 0.5)
+        torso_center_src = ((shoulder_center_src[0] + hip_center_src[0]) * 0.5, (shoulder_center_src[1] + hip_center_src[1]) * 0.5)
+        torso_height = max(1.0, math.hypot(shoulder_center_src[0] - hip_center_src[0], shoulder_center_src[1] - hip_center_src[1]))
+        scale = 0.64 / torso_height
 
-    @staticmethod
-    def _phase_peak(progress: float, start: float, peak: float, end: float) -> float:
-        if progress <= start or progress >= end:
-            return 0.0
-        if progress <= peak:
-            return (progress - start) / max(0.001, peak - start)
-        return 1.0 - (progress - peak) / max(0.001, end - peak)
+        def _local(point: tuple[float, float]) -> tuple[float, float]:
+            return (
+                (point[0] - torso_center_src[0]) * scale * facing_sign,
+                (hip_center_src[1] - point[1]) * scale + 0.70,
+            )
 
-    def _martial_motion_progress(self, motion: str, progress: float) -> float:
-        factor = {
-            "flying-kick": 1.10,
-            "double-palm-push": 1.02,
-            "spin-kick": 1.24,
-            "diagonal-kick": 1.10,
-            "hook-punch": 1.06,
-            "swing-punch": 1.02,
-            "straight-punch": 1.04,
-            "combo-punch": 1.00,
-            "somersault": 1.16,
-        }.get(str(motion or ""), 1.0)
-        if factor <= 1.0:
-            return max(0.0, min(1.0, progress))
-        return self._ease_out_cubic(progress ** (1.0 / factor))
-
-    @staticmethod
-    def _pose_point(origin: tuple[float, float], length: float, angle_deg: float, horizontal_sign: float) -> tuple[float, float]:
-        angle = math.radians(angle_deg)
-        return (
-            origin[0] + math.cos(angle) * length * horizontal_sign,
-            origin[1] - math.sin(angle) * length,
+        pelvis_center = _local(hip_center_src)
+        chest_center = _local(shoulder_center_src)
+        up_x = chest_center[0] - pelvis_center[0]
+        up_z = chest_center[1] - pelvis_center[1]
+        up_len = max(0.001, math.hypot(up_x, up_z))
+        up_unit = (up_x / up_len, up_z / up_len)
+        head_src = self._pose_head_point(points)
+        if head_src is not None:
+            head_center = _local(head_src)
+        else:
+            head_center = (chest_center[0] + up_unit[0] * 0.92, chest_center[1] + up_unit[1] * 0.92)
+        min_head_gap = 0.56
+        current_gap = (head_center[0] - chest_center[0]) * up_unit[0] + (head_center[1] - chest_center[1]) * up_unit[1]
+        if current_gap < min_head_gap:
+            head_center = (
+                chest_center[0] + up_unit[0] * min_head_gap,
+                chest_center[1] + up_unit[1] * min_head_gap,
+            )
+        neck_center = (
+            chest_center[0] + (head_center[0] - chest_center[0]) * 0.42,
+            chest_center[1] + (head_center[1] - chest_center[1]) * 0.42,
         )
 
-    @staticmethod
-    def _spread_pair(
-        left_point: tuple[float, float],
-        right_point: tuple[float, float],
-        min_gap: float,
-    ) -> tuple[tuple[float, float], tuple[float, float]]:
-        left_x, left_z = left_point
-        right_x, right_z = right_point
-        if left_x > right_x:
-            left_x, right_x = right_x, left_x
-            left_z, right_z = right_z, left_z
-        gap = right_x - left_x
-        if gap >= min_gap:
-            return (left_x, left_z), (right_x, right_z)
-        center = (left_x + right_x) * 0.5
-        half_gap = min_gap * 0.5
-        return (center - half_gap, left_z), (center + half_gap, right_z)
+        def _named(name: str, fallback: tuple[float, float]) -> tuple[float, float]:
+            point = points.get(name)
+            return _local(point) if point is not None else fallback
 
-    @staticmethod
-    def _clamp_side(point: tuple[float, float], center_x: float, side: str, min_offset: float) -> tuple[float, float]:
-        x, z = point
-        if side == "left":
-            return (min(x, center_x - min_offset), z)
-        return (max(x, center_x + min_offset), z)
+        def _stretch(anchor: tuple[float, float], point: tuple[float, float], ratio: float) -> tuple[float, float]:
+            return (
+                anchor[0] + (point[0] - anchor[0]) * ratio,
+                anchor[1] + (point[1] - anchor[1]) * ratio,
+            )
 
-    def _pose_angles(self, motion: str, progress: float) -> dict[str, float]:
-        walk = math.sin(progress * math.tau)
-        talk = math.sin(progress * math.tau * 2.0)
-        pose = {
-            "front_upper_arm": 88,
-            "front_lower_arm": 92,
-            "back_upper_arm": 88,
-            "back_lower_arm": 92,
-            "front_upper_leg": 98,
-            "front_lower_leg": 92,
-            "back_upper_leg": 98,
-            "back_lower_leg": 92,
-            "front_foot": 6,
-            "back_foot": -6,
+        shoulder_left = _named("left_shoulder", (chest_center[0] - 0.25, chest_center[1] + 0.22))
+        shoulder_right = _named("right_shoulder", (chest_center[0] + 0.25, chest_center[1] + 0.22))
+        hip_left = _named("left_hip", (pelvis_center[0] - 0.11, pelvis_center[1] - 0.02))
+        hip_right = _named("right_hip", (pelvis_center[0] + 0.11, pelvis_center[1] - 0.02))
+        elbow_left = _named("left_elbow", shoulder_left)
+        elbow_right = _named("right_elbow", shoulder_right)
+        hand_left = _named("left_wrist", elbow_left)
+        hand_right = _named("right_wrist", elbow_right)
+        knee_left = _named("left_knee", hip_left)
+        knee_right = _named("right_knee", hip_right)
+        foot_left = _named("left_ankle", knee_left)
+        foot_right = _named("right_ankle", knee_right)
+        elbow_left = _stretch(shoulder_left, elbow_left, 1.10)
+        elbow_right = _stretch(shoulder_right, elbow_right, 1.10)
+        hand_left = _stretch(elbow_left, hand_left, 1.16)
+        hand_right = _stretch(elbow_right, hand_right, 1.16)
+        knee_left = _stretch(hip_left, knee_left, 1.14)
+        knee_right = _stretch(hip_right, knee_right, 1.14)
+        foot_left = _stretch(knee_left, foot_left, 1.18)
+        foot_right = _stretch(knee_right, foot_right, 1.18)
+        head_center = _stretch(chest_center, head_center, 1.06)
+        neck_center = (
+            chest_center[0] + (head_center[0] - chest_center[0]) * 0.36,
+            chest_center[1] + (head_center[1] - chest_center[1]) * 0.36,
+        )
+        torso_r = math.degrees(math.atan2(chest_center[0] - pelvis_center[0], chest_center[1] - pelvis_center[1]))
+        head_r = math.degrees(math.atan2(head_center[0] - neck_center[0], head_center[1] - neck_center[1]))
+        return {
+            "pelvis_center": pelvis_center,
+            "chest_center": chest_center,
+            "neck_center": neck_center,
+            "head_center": head_center,
+            "torso_r": torso_r,
+            "head_r": head_r,
+            "shoulder_left": shoulder_left,
+            "shoulder_right": shoulder_right,
+            "hip_left": hip_left,
+            "hip_right": hip_right,
+            "elbow_left": elbow_left,
+            "elbow_right": elbow_right,
+            "hand_left": hand_left,
+            "hand_right": hand_right,
+            "knee_left": knee_left,
+            "knee_right": knee_right,
+            "foot_left": foot_left,
+            "foot_right": foot_right,
         }
-        if motion == "point":
-            pose.update({"front_upper_arm": 18, "front_lower_arm": 2, "back_upper_arm": 118, "back_lower_arm": 96, "front_upper_leg": 88, "back_upper_leg": 102})
-        elif motion == "flying-kick":
-            windup = self._phase_peak(progress, 0.00, 0.14, 0.30)
-            strike = self._phase_peak(progress, 0.22, 0.48, 0.76)
-            recover = self._phase_peak(progress, 0.72, 0.88, 1.00)
-            pose.update(
-                {
-                    "front_upper_arm": 162 - windup * 26 - strike * 54 + recover * 18,
-                    "front_lower_arm": 138 - windup * 20 - strike * 70 + recover * 24,
-                    "back_upper_arm": 26 + windup * 30 + strike * 26 - recover * 10,
-                    "back_lower_arm": 54 + windup * 16 + strike * 16,
-                    "front_upper_leg": 72 - windup * 62 - strike * 74 + recover * 30,
-                    "front_lower_leg": 84 - windup * 76 - strike * 108 + recover * 50,
-                    "back_upper_leg": 132 + windup * 20 - strike * 18 - recover * 10,
-                    "back_lower_leg": 150 + windup * 16 + strike * 20 - recover * 16,
-                    "front_foot": 18 + strike * 22,
-                    "back_foot": -12 - windup * 10,
-                }
-            )
-        elif motion == "double-palm-push":
-            windup = self._phase_peak(progress, 0.00, 0.16, 0.34)
-            strike = self._phase_peak(progress, 0.24, 0.44, 0.70)
-            recover = self._phase_peak(progress, 0.66, 0.86, 1.00)
-            pose.update(
-                {
-                    "front_upper_arm": 94 - windup * 78 - strike * 98 + recover * 34,
-                    "front_lower_arm": 102 - windup * 62 - strike * 118 + recover * 40,
-                    "back_upper_arm": 96 - windup * 72 - strike * 104 + recover * 30,
-                    "back_lower_arm": 94 - windup * 56 - strike * 116 + recover * 36,
-                    "front_upper_leg": 86 + windup * 12 - strike * 18 + recover * 6,
-                    "front_lower_leg": 100 + windup * 8 - strike * 10,
-                    "back_upper_leg": 104 + windup * 26 - strike * 32 + recover * 12,
-                    "back_lower_leg": 94 + windup * 12 - strike * 6,
-                    "front_foot": 4 + strike * 6,
-                    "back_foot": -6 - windup * 12,
-                }
-            )
-        elif motion == "spin-kick":
-            sweep = math.sin(progress * math.tau * 1.35)
-            lift = self._phase_peak(progress, 0.12, 0.42, 0.76)
-            recoil = self._phase_peak(progress, 0.68, 0.84, 1.00)
-            pose.update(
-                {
-                    "front_upper_arm": 94 + sweep * 38 - recoil * 14,
-                    "front_lower_arm": 102 + sweep * 24 - recoil * 8,
-                    "back_upper_arm": 96 - sweep * 42 + recoil * 10,
-                    "back_lower_arm": 90 - sweep * 26 + recoil * 8,
-                    "front_upper_leg": 84 - lift * 68 + recoil * 18,
-                    "front_lower_leg": 96 - lift * 86 + recoil * 30,
-                    "back_upper_leg": 102 + lift * 18 - recoil * 10,
-                    "back_lower_leg": 94 + lift * 54 - recoil * 24,
-                    "front_foot": 10 + lift * 16,
-                    "back_foot": -10 - lift * 12,
-                }
-            )
-        elif motion == "diagonal-kick":
-            windup = self._phase_peak(progress, 0.00, 0.18, 0.34)
-            strike = self._phase_peak(progress, 0.24, 0.46, 0.72)
-            recover = self._phase_peak(progress, 0.70, 0.88, 1.00)
-            pose.update(
-                {
-                    "front_upper_arm": 126 - windup * 18 - strike * 24 + recover * 16,
-                    "front_lower_arm": 116 - windup * 14 - strike * 26 + recover * 14,
-                    "back_upper_arm": 62 + windup * 18 + strike * 12 - recover * 6,
-                    "back_lower_arm": 76 + windup * 10 + strike * 12,
-                    "front_upper_leg": 82 - windup * 44 - strike * 72 + recover * 30,
-                    "front_lower_leg": 98 - windup * 52 - strike * 86 + recover * 36,
-                    "back_upper_leg": 94 - windup * 38 - strike * 68 + recover * 26,
-                    "back_lower_leg": 108 - windup * 46 - strike * 80 + recover * 34,
-                    "front_foot": 20 + strike * 12,
-                    "back_foot": 12 + strike * 10,
-                }
-            )
-        elif motion == "hook-punch":
-            load = self._phase_peak(progress, 0.00, 0.14, 0.28)
-            snap = self._phase_peak(progress, 0.20, 0.38, 0.58)
-            recoil = self._phase_peak(progress, 0.56, 0.80, 1.00)
-            pose.update(
-                {
-                    "front_upper_arm": 122 + load * 74 - snap * 152 + recoil * 52,
-                    "front_lower_arm": 122 + load * 46 - snap * 160 + recoil * 64,
-                    "back_upper_arm": 170 + load * 48 - snap * 34 - recoil * 28,
-                    "back_lower_arm": 120 + load * 30 - snap * 12 - recoil * 16,
-                    "front_upper_leg": 94 + load * 14 - snap * 28 + recoil * 8,
-                    "front_lower_leg": 114 + load * 24 - snap * 40 + recoil * 12,
-                    "back_upper_leg": 118 + load * 32 - snap * 26,
-                    "back_lower_leg": 112 + load * 16 - snap * 10,
-                    "front_foot": 4,
-                    "back_foot": -10 - load * 10,
-                }
-            )
-        elif motion == "swing-punch":
-            load = self._phase_peak(progress, 0.00, 0.18, 0.34)
-            whip = self._phase_peak(progress, 0.24, 0.48, 0.74)
-            recover = self._phase_peak(progress, 0.70, 0.88, 1.00)
-            pose.update(
-                {
-                    "front_upper_arm": 178 + load * 52 - whip * 168 + recover * 58,
-                    "front_lower_arm": 154 + load * 36 - whip * 120 + recover * 42,
-                    "back_upper_arm": -8 + load * 28 + whip * 84 - recover * 24,
-                    "back_lower_arm": 32 + load * 24 + whip * 60 - recover * 16,
-                    "front_upper_leg": 92 + load * 10 - whip * 18 - recover * 4,
-                    "front_lower_leg": 110 + load * 18 - whip * 18 - recover * 6,
-                    "back_upper_leg": 120 + load * 30 - whip * 32 + recover * 12,
-                    "back_lower_leg": 108 + load * 12 - whip * 10,
-                    "front_foot": 10 + whip * 12,
-                    "back_foot": -12 - load * 12,
-                }
-            )
-        elif motion == "straight-punch":
-            load = self._phase_peak(progress, 0.00, 0.14, 0.26)
-            snap = self._phase_peak(progress, 0.18, 0.34, 0.52)
-            recover = self._phase_peak(progress, 0.50, 0.74, 1.00)
-            pose.update(
-                {
-                    "front_upper_arm": 108 + load * 34 - snap * 154 + recover * 48,
-                    "front_lower_arm": 110 + load * 24 - snap * 178 + recover * 58,
-                    "back_upper_arm": 162 + load * 48 - snap * 28 - recover * 24,
-                    "back_lower_arm": 120 + load * 34 - snap * 10 - recover * 16,
-                    "front_upper_leg": 92 + load * 12 - snap * 20 + recover * 6,
-                    "front_lower_leg": 110 + load * 18 - snap * 24 + recover * 8,
-                    "back_upper_leg": 118 + load * 28 - snap * 20,
-                    "back_lower_leg": 108 + load * 14 - snap * 10,
-                    "front_foot": 4,
-                    "back_foot": -10 - load * 8,
-                }
-            )
-        elif motion == "combo-punch":
-            straight = self._phase_peak(progress, 0.00, 0.16, 0.34)
-            hook = self._phase_peak(progress, 0.33, 0.50, 0.67)
-            swing = self._phase_peak(progress, 0.66, 0.83, 0.98)
-            reset = self._phase_peak(progress, 0.94, 0.98, 1.00)
-            pose.update(
-                {
-                    "front_upper_arm": 110 - straight * 154 - hook * 148 - swing * 132 + reset * 42,
-                    "front_lower_arm": 112 - straight * 178 - hook * 166 - swing * 146 + reset * 52,
-                    "back_upper_arm": 162 + straight * 30 + hook * 54 - swing * 142 + reset * 20,
-                    "back_lower_arm": 120 + straight * 24 + hook * 34 - swing * 150 + reset * 14,
-                    "front_upper_leg": 92 + straight * 10 + hook * 14 + swing * 10 - reset * 4,
-                    "front_lower_leg": 110 + straight * 14 + hook * 18 + swing * 12 - reset * 2,
-                    "back_upper_leg": 120 + straight * 26 + hook * 34 + swing * 30 - reset * 8,
-                    "back_lower_leg": 108 + straight * 14 + hook * 18 + swing * 16 - reset * 4,
-                    "front_foot": 4 + straight * 8 + hook * 6,
-                    "back_foot": -8 - swing * 10,
-                }
-            )
-        elif motion in {"enter", "exit"}:
-            swing = math.sin(progress * math.tau * 1.4)
-            pose.update({"front_upper_arm": 78 + swing * 10, "front_lower_arm": 94 + swing * 6, "back_upper_arm": 102 - swing * 10, "back_lower_arm": 94 - swing * 6, "front_upper_leg": 84 - swing * 18, "front_lower_leg": 96 + swing * 7, "back_upper_leg": 102 + swing * 18, "back_lower_leg": 92 - swing * 7})
-        elif motion == "somersault":
-            tuck = math.sin(progress * math.pi)
-            pose.update({"front_upper_arm": 34, "front_lower_arm": 88, "back_upper_arm": 146, "back_lower_arm": 100, "front_upper_leg": 60 + tuck * 10, "front_lower_leg": 34, "back_upper_leg": 122 - tuck * 10, "back_lower_leg": 148})
-        elif motion == "talk":
-            pose.update({"front_upper_arm": 86 + talk * 1.5, "front_lower_arm": 92 + talk * 2, "back_upper_arm": 90 - talk * 1.5, "back_lower_arm": 92 - talk * 2})
-        return pose
 
-    def _motion_body_state(self, motion: str, progress: float, talking: bool) -> dict[str, float]:
-        talk_wave = math.sin(progress * math.tau * 2.0) if talking else 0.0
-        state = {
+    @staticmethod
+    def _static_body_state(talking: bool) -> dict[str, float]:
+        talk_wave = math.sin(0.0) if not talking else 0.0
+        return {
             "root_dx": 0.0,
             "jump": 0.0,
             "pelvis_x": 0.0,
@@ -500,52 +400,17 @@ class PandaTrue3DRenderer:
             "neck_r": 0.0,
             "head_x": 0.0,
             "head_z": 2.31,
-            "head_r": talk_wave * 3.0,
+            "head_r": talk_wave,
         }
-        if motion == "point":
-            state.update({"chest_x": 0.10, "chest_r": -8.0, "head_x": 0.06, "head_r": -10.0})
-        elif motion == "enter":
-            stride = math.sin(progress * math.tau * 1.4)
-            state.update({"pelvis_z": 0.74 + abs(stride) * 0.02, "chest_r": stride * 4.0, "head_r": stride * 2.0})
-        elif motion == "exit":
-            stride = math.sin(progress * math.tau * 1.4)
-            state.update({"pelvis_z": 0.74 + abs(stride) * 0.02, "chest_r": -stride * 4.0, "head_r": -stride * 2.0})
-        elif motion == "flying-kick":
-            strike = self._phase_peak(progress, 0.22, 0.48, 0.76)
-            lift = math.sin(progress * math.pi)
-            state.update({"jump": 0.66 * lift, "root_dx": 0.18 * strike, "pelvis_z": 0.68, "pelvis_r": -16.0 * strike, "chest_z": 1.24, "chest_r": -28.0 * strike, "head_z": 2.02, "head_r": -12.0 * strike})
-        elif motion == "double-palm-push":
-            load = self._phase_peak(progress, 0.00, 0.16, 0.34)
-            strike = self._phase_peak(progress, 0.24, 0.44, 0.70)
-            state.update({"root_dx": 0.10 * strike, "pelvis_z": 0.74 - load * 0.08, "pelvis_r": -8.0 - strike * 4.0, "chest_x": 0.06 * strike, "chest_r": -18.0 * strike, "head_x": 0.04 * strike, "head_r": -10.0 * strike})
-        elif motion == "spin-kick":
-            whip = math.sin(progress * math.tau * 1.1)
-            lift = self._phase_peak(progress, 0.16, 0.42, 0.76)
-            state.update({"jump": 0.24 * lift, "pelvis_r": whip * 22.0, "chest_r": whip * 34.0, "head_r": whip * 18.0})
-        elif motion == "diagonal-kick":
-            strike = self._phase_peak(progress, 0.24, 0.46, 0.72)
-            state.update({"jump": 0.34 * math.sin(progress * math.pi), "pelvis_z": 0.70, "pelvis_r": -14.0 * strike, "chest_r": -22.0 * strike, "head_r": -8.0 * strike})
-        elif motion == "hook-punch":
-            load = self._phase_peak(progress, 0.00, 0.14, 0.28)
-            snap = self._phase_peak(progress, 0.20, 0.38, 0.58)
-            state.update({"pelvis_x": -0.10 * load + 0.06 * snap, "pelvis_r": 18.0 * load - 22.0 * snap, "chest_x": -0.08 * load + 0.12 * snap, "chest_r": 26.0 * load - 34.0 * snap, "head_x": 0.04 * snap, "head_r": -14.0 * snap})
-        elif motion == "swing-punch":
-            whip = self._phase_peak(progress, 0.24, 0.48, 0.74)
-            state.update({"pelvis_r": 24.0 * whip, "chest_r": 38.0 * whip, "head_r": 20.0 * whip, "root_dx": 0.06 * whip})
-        elif motion == "straight-punch":
-            snap = self._phase_peak(progress, 0.18, 0.34, 0.52)
-            state.update({"pelvis_r": -10.0 * snap, "chest_r": -24.0 * snap, "head_r": -10.0 * snap, "root_dx": 0.10 * snap})
-        elif motion == "combo-punch":
-            straight = self._phase_peak(progress, 0.00, 0.16, 0.34)
-            hook = self._phase_peak(progress, 0.33, 0.50, 0.67)
-            swing = self._phase_peak(progress, 0.66, 0.83, 0.98)
-            state.update({"pelvis_r": -10.0 * straight + 16.0 * hook + 22.0 * swing, "chest_r": -22.0 * straight + 26.0 * hook + 36.0 * swing, "head_r": -8.0 * straight + 10.0 * hook + 18.0 * swing, "root_dx": 0.06 * straight + 0.08 * hook + 0.12 * swing})
-        elif motion == "somersault":
-            arc = math.sin(progress * math.pi)
-            state.update({"jump": 0.74 * arc, "pelvis_z": 0.72, "pelvis_r": 180.0 * progress, "chest_z": 1.20, "chest_r": 220.0 * progress, "head_z": 1.92, "head_r": 260.0 * progress})
-        elif motion == "talk":
-            state.update({"pelvis_r": talk_wave * 1.5, "chest_r": talk_wave * 3.0, "head_r": talk_wave * 4.0})
-        return state
+
+    @staticmethod
+    def _lerp(start: float, end: float, ratio: float) -> float:
+        return start + (end - start) * max(0.0, min(1.0, ratio))
+
+    @staticmethod
+    def _ease_in_out(ratio: float) -> float:
+        ratio = max(0.0, min(1.0, ratio))
+        return 0.5 - 0.5 * math.cos(math.pi * ratio)
 
     def _vertical_gradient_texture(
         self,
@@ -683,10 +548,12 @@ class PandaTrue3DRenderer:
         normalized_path = path.replace("\\", "/")
         is_prop_asset = "/assets/props/" in normalized_path
         is_character_asset = "/assets/characters/" in normalized_path
+        is_face_asset = "/skins/face_" in normalized_path
         try:
             stat = Path(path).stat()
             bg_version = PROP_WHITE_BG_VERSION if (is_prop_asset or is_character_asset) else 0
-            cache_key = f"{path}|{stat.st_size}|{int(stat.st_mtime_ns)}|propbgv={bg_version}"
+            face_crop_version = 2 if is_face_asset else 0
+            cache_key = f"{path}|{stat.st_size}|{int(stat.st_mtime_ns)}|propbgv={bg_version}|facecrop={face_crop_version}"
         except OSError:
             cache_key = path
         cached = self._texture_sequence_cache.get(cache_key)
@@ -697,10 +564,26 @@ class PandaTrue3DRenderer:
         suffix = Path(path).suffix.lower()
         static_suffixes = {".png", ".jpg", ".jpeg"}
         if suffix in static_suffixes:
-            texture = self.base.loader.loadTexture(self._core["Filename"].fromOsSpecific(path))
-            if texture:
-                frames = [texture]
-                durations = [100]
+            digest = hashlib.sha1(cache_key.encode("utf-8")).hexdigest()[:16]
+            try:
+                with Image.open(path) as image:
+                    rgba = image.convert("RGBA")
+                    if is_prop_asset or is_character_asset:
+                        rgba = self._remove_white_prop_background(rgba)
+                    if is_face_asset:
+                        rgba = self._crop_visible_face_region(rgba)
+                    frame_path = self._texture_cache_dir / f"{digest}-0.png"
+                    if not frame_path.exists():
+                        rgba.save(frame_path)
+                    texture = self.base.loader.loadTexture(self._core["Filename"].fromOsSpecific(str(frame_path)))
+                    if texture:
+                        frames = [texture]
+                        durations = [100]
+            except Exception:
+                texture = self.base.loader.loadTexture(self._core["Filename"].fromOsSpecific(path))
+                if texture:
+                    frames = [texture]
+                    durations = [100]
         else:
             digest = hashlib.sha1(cache_key.encode("utf-8")).hexdigest()[:16]
             try:
@@ -712,6 +595,8 @@ class PandaTrue3DRenderer:
                         rgba = image.convert("RGBA")
                         if is_prop_asset or is_character_asset:
                             rgba = self._remove_white_prop_background(rgba)
+                        if is_face_asset:
+                            rgba = self._crop_visible_face_region(rgba)
                         frame_path = self._texture_cache_dir / f"{digest}-{index}.png"
                         if not frame_path.exists():
                             rgba.save(frame_path)
@@ -727,6 +612,46 @@ class PandaTrue3DRenderer:
         self._texture_sequence_cache[cache_key] = payload
         self._frame_duration_cache[path] = payload["durations"]
         return payload
+
+    @staticmethod
+    def _crop_visible_face_region(image: Image.Image) -> Image.Image:
+        alpha = image.getchannel("A")
+        bbox = alpha.getbbox()
+        if bbox is None:
+            return image
+        left, top, right, bottom = bbox
+        width = right - left
+        height = bottom - top
+        crop_width = max(1, int(round(width * 0.82)))
+        crop_height = max(1, int(round(min(height * 0.72, max(width * 0.62, height * 0.56)))))
+        cx = (left + right) * 0.5
+        x0 = int(round(cx - crop_width * 0.5))
+        y0 = int(round(top + max(0.0, (height - crop_height) * 0.02)))
+        x1 = x0 + crop_width
+        y1 = y0 + crop_height
+        if x0 < 0:
+            x1 -= x0
+            x0 = 0
+        if y0 < 0:
+            y1 -= y0
+            y0 = 0
+        if x1 > image.width:
+            shift = x1 - image.width
+            x0 = max(0, x0 - shift)
+            x1 = image.width
+        if y1 > image.height:
+            shift = y1 - image.height
+            y0 = max(0, y0 - shift)
+            y1 = image.height
+        cropped = image.crop((x0, y0, x1, y1)).convert("RGBA")
+        target_size = (240, 184)
+        cropped = cropped.resize(target_size, Image.Resampling.LANCZOS)
+        mask = Image.new("L", target_size, 0)
+        draw = ImageDraw.Draw(mask)
+        draw.ellipse((0, 0, max(0, target_size[0] - 1), max(0, target_size[1] - 1)), fill=255)
+        cropped_alpha = cropped.getchannel("A")
+        cropped.putalpha(ImageChops.multiply(cropped_alpha, mask))
+        return cropped
 
     @staticmethod
     def _is_near_white(pixel: tuple[int, int, int, int]) -> bool:
@@ -919,19 +844,26 @@ class PandaTrue3DRenderer:
                         return str(candidate)
         return None
 
-    def _face_skin_path(self, character: dict[str, Any], expression: str, time_ms: int) -> Optional[str]:
-        mouth_open = (time_ms // 120) % 2 == 0
+    def _face_skin_path(self, character: dict[str, Any], expression: str, time_ms: int, *, talking: bool = False) -> Optional[str]:
+        normalized = str(expression or "default").strip().lower().replace("-", "_")
+        mouth_open = (time_ms // 160) % 2 == 0
         talk_suffix = "open" if mouth_open else "closed"
-        if expression == "talk":
-            candidates = [f"face_talk_neutral_{talk_suffix}", "face_neutral", "face_default"]
-        elif expression == "fierce":
-            candidates = [f"face_talk_angry_{talk_suffix}", "face_angry", "face_default"]
-        elif expression == "smirk":
-            candidates = ["face_skeptical", "face_smile", "face_default"]
-        elif expression == "hurt":
-            candidates = ["face_thinking", "face_skeptical", "face_default"]
+        candidates: list[str] = []
+        if talking:
+            candidates.extend(
+                [
+                    f"face_talk_{normalized}_{talk_suffix}",
+                    f"face_talk_neutral_{talk_suffix}",
+                    f"face_talk_smile_{talk_suffix}",
+                    f"face_talk_angry_{talk_suffix}",
+                    f"face_{normalized}_{talk_suffix}",
+                    f"face_neutral_{talk_suffix}",
+                ]
+            )
+        if normalized == "default":
+            candidates.extend(["face_default", "face_neutral"])
         else:
-            candidates = ["face_default", "face_neutral", "face_smile"]
+            candidates.extend([f"face_{normalized}", "face_default", "face_neutral"])
         return self._character_skin_path(character, candidates)
 
     def _outfit_skin_path(self, character: dict[str, Any]) -> Optional[str]:
@@ -1215,15 +1147,18 @@ class PandaTrue3DRenderer:
                 return str(item.get("expression") or "").strip() or None
         return None
 
-    def _expression_for_actor(self, scene: dict[str, Any], actor_id: str, time_ms: int) -> str:
-        explicit = self._active_expression(scene, actor_id, time_ms)
-        if explicit:
-            return explicit
+    def _is_actor_talking(self, scene: dict[str, Any], actor_id: str, time_ms: int) -> bool:
         for dialogue in scene.get("dialogues", []):
             if str(dialogue.get("speaker_id") or "") != actor_id:
                 continue
             if int(dialogue.get("start_ms", -1)) <= time_ms <= int(dialogue.get("end_ms", -1)):
-                return "talk"
+                return True
+        return False
+
+    def _expression_for_actor(self, scene: dict[str, Any], actor_id: str, time_ms: int) -> str:
+        explicit = self._active_expression(scene, actor_id, time_ms)
+        if explicit:
+            return explicit
         return "neutral"
 
     def _prepare_scene(self, scene: dict[str, Any]) -> None:
@@ -1369,17 +1304,17 @@ class PandaTrue3DRenderer:
             lower_leg_left = self._attach_card(actor_root, 1.0, 1.0, f"lower-leg-left-{actor_id}", (-0.11, -0.04, -0.16), (1.0, 1.0, 1.0, 1.0))
             upper_leg_right = self._attach_card(actor_root, 1.0, 1.0, f"upper-leg-right-{actor_id}", (0.11, -0.04, 0.40), (1.0, 1.0, 1.0, 1.0))
             lower_leg_right = self._attach_card(actor_root, 1.0, 1.0, f"lower-leg-right-{actor_id}", (0.11, -0.04, -0.16), (1.0, 1.0, 1.0, 1.0))
-            pelvis_card = self._attach_card(actor_root, 0.40, 0.40, f"pelvis-{actor_id}", (0.0, 0.0, 0.78), (1.0, 1.0, 1.0, 0.0))
-            body_card = self._attach_card(actor_root, 0.82, 2.06, f"body-{actor_id}", (0.0, 0.0, 1.38), (1.0, 1.0, 1.0, 1.0))
-            neck_card = self._attach_card(actor_root, 0.09, 0.30, f"neck-{actor_id}", (0.0, 0.0, 1.98), (1.0, 1.0, 1.0, 1.0))
-            head_base = self._attach_card(actor_root, 0.74, 1.14, f"head-base-{actor_id}", (0.0, 0.01, 2.08), (1.0, 1.0, 1.0, 1.0))
+            pelvis_card = self._attach_card(actor_root, 0.34, 0.34, f"pelvis-{actor_id}", (0.0, 0.0, 0.78), (1.0, 1.0, 1.0, 0.0))
+            body_card = self._attach_card(actor_root, 0.64, 2.24, f"body-{actor_id}", (0.0, 0.0, 1.42), (1.0, 1.0, 1.0, 1.0))
+            neck_card = self._attach_card(actor_root, 0.06, 0.38, f"neck-{actor_id}", (0.0, 0.0, 2.03), (1.0, 1.0, 1.0, 1.0))
+            head_base = self._attach_card(actor_root, 0.98, 0.82, f"head-base-{actor_id}", (0.0, 0.01, 2.08), (1.0, 1.0, 1.0, 1.0))
             self._apply_texture(body_card, self._rounded_rect_texture(f"body-{actor_id}", (182, 448), 78, alpha=1.0))
             self._apply_texture(pelvis_card, self._rounded_rect_texture(f"pelvis-{actor_id}", (32, 32), 16, alpha=0.0))
             self._apply_texture(neck_card, self._rounded_rect_texture(f"neck-{actor_id}", (34, 112), 16, alpha=1.0))
-            self._apply_texture(head_base, self._shape_texture(f"head-{actor_id}", (174, 256), alpha=1.0))
-            face_card = self._attach_card(actor_root, 0.48, 0.72, f"face-{actor_id}", (0.0, 0.03, 2.02), (1.0, 1.0, 1.0, 1.0))
-            ear_left = self._attach_card(actor_root, 0.34, 0.34, f"ear-left-{actor_id}", (-0.27, -0.02, 2.40), (0.08, 0.08, 0.08, 1.0))
-            ear_right = self._attach_card(actor_root, 0.34, 0.34, f"ear-right-{actor_id}", (0.27, -0.02, 2.40), (0.08, 0.08, 0.08, 1.0))
+            self._apply_texture(head_base, self._shape_texture(f"head-{actor_id}", (240, 184), alpha=1.0))
+            face_card = self._attach_card(actor_root, 0.98, 0.82, f"face-{actor_id}", (0.0, 0.03, 2.08), (1.0, 1.0, 1.0, 1.0))
+            ear_left = self._attach_card(actor_root, 0.42, 0.42, f"ear-left-{actor_id}", (-0.27, -0.02, 2.40), (0.08, 0.08, 0.08, 1.0))
+            ear_right = self._attach_card(actor_root, 0.42, 0.42, f"ear-right-{actor_id}", (0.27, -0.02, 2.40), (0.08, 0.08, 0.08, 1.0))
             joints = {}
             for name, pos, size in (
                 ("shoulder_left", (-0.21, -0.01, 1.42), 0.12),
@@ -1577,68 +1512,88 @@ class PandaTrue3DRenderer:
         y = -0.75 if layer == "front" else 0.55
         expression = self._expression_for_actor(scene, actor_id, time_ms)
         active_beat = self._active_beat(scene, actor_id, time_ms)
-        is_talking = expression == "talk"
+        is_talking = self._is_actor_talking(scene, actor_id, time_ms)
         has_action = active_beat is not None
         facing = str((active_beat or {}).get("facing") or actor_item.get("facing") or "right").strip().lower()
         facing_sign = -1.0 if facing == "left" else 1.0
-        motion = str((active_beat or {}).get("motion") or ("talk" if is_talking else "idle"))
         if active_beat:
             start_ms = int(active_beat.get("start_ms", 0) or 0)
             end_ms = max(start_ms + 1, int(active_beat.get("end_ms", start_ms + 1) or start_ms + 1))
             beat_ratio = (time_ms - start_ms) / max(1.0, float(end_ms - start_ms))
             if active_beat.get("x0") is not None and active_beat.get("x1") is not None:
                 x = self._lerp(float(active_beat.get("x0", x) or x), float(active_beat.get("x1", x) or x), self._ease_in_out(beat_ratio))
-        else:
-            beat_ratio = (time_ms % 1400) / 1400.0
-        motion_progress = self._martial_motion_progress(motion, beat_ratio)
-        motion_strength = 1.0 if has_action else (0.05 if is_talking else 0.0)
+        motion_strength = 0.0 if has_action else (0.02 if is_talking else 0.0)
         bob = abs(math.sin(time_ms / 220.0 + x * 0.3)) * 0.02 * motion_strength
-        body_state = self._motion_body_state(motion, motion_progress, is_talking)
+        pose_state = self._pose_body_state(active_beat, time_ms, facing_sign) if active_beat and active_beat.get("pose_track_path") else None
+        body_state = self._static_body_state(is_talking) if pose_state is None else {
+            "root_dx": 0.0,
+            "jump": 0.0,
+            "pelvis_x": pose_state["pelvis_center"][0],
+            "pelvis_z": pose_state["pelvis_center"][1],
+            "pelvis_r": pose_state["torso_r"],
+            "chest_x": pose_state["chest_center"][0],
+            "chest_z": pose_state["chest_center"][1],
+            "chest_r": pose_state["torso_r"],
+            "neck_x": pose_state["neck_center"][0],
+            "neck_z": pose_state["neck_center"][1],
+            "neck_r": pose_state["head_r"],
+            "head_x": pose_state["head_center"][0],
+            "head_z": pose_state["head_center"][1],
+            "head_r": pose_state["head_r"],
+        }
         root.setPos(
             x + body_state["root_dx"] * facing_sign,
             y,
             -room["height"] / 2.0 + room["floor_thickness"] / 2.0 + z + bob + body_state["jump"],
         )
         base_scale = 1.55 * float(actor_item.get("scale", 1.0) or 1.0)
-        root.setScale(base_scale)
+        root.setScale(base_scale * 0.96, base_scale, base_scale * 1.50)
 
         character = self.characters.get(self.cast.get(actor_id, {}).get("asset_id", ""), {})
-        face_texture = self._texture_at_time(self._face_skin_path(character, expression, time_ms), time_ms)
+        face_texture = self._texture_at_time(self._face_skin_path(character, expression, time_ms, talking=is_talking), time_ms)
         outfit_texture = self._texture_at_time(self._outfit_skin_path(character), time_ms)
         body_color = tuple(character.get("body_color") or (0.24, 0.34, 0.46, 1.0))
         trim_color = tuple(character.get("body_secondary_color") or (0.82, 0.82, 0.82, 1.0))
         head_color = tuple(character.get("head_color") or (0.97, 0.97, 0.95, 1.0))
-        pose = self._pose_angles(motion, motion_progress)
-        pelvis_center = (body_state["pelvis_x"] * facing_sign, body_state["pelvis_z"])
-        chest_center = (body_state["chest_x"] * facing_sign, body_state["chest_z"])
-        neck_center = (body_state["neck_x"] * facing_sign, body_state["neck_z"])
-        head_center = (body_state["head_x"] * facing_sign, body_state["head_z"])
-        shoulder_left = (chest_center[0] - 0.25 * facing_sign, chest_center[1] + 0.22)
-        shoulder_right = (chest_center[0] + 0.25 * facing_sign, chest_center[1] + 0.22)
-        hip_left = (pelvis_center[0] - 0.11 * facing_sign, pelvis_center[1] - 0.02)
-        hip_right = (pelvis_center[0] + 0.11 * facing_sign, pelvis_center[1] - 0.02)
-        front_arm_sign = -facing_sign
-        back_arm_sign = facing_sign
-        front_leg_sign = facing_sign
-        back_leg_sign = -facing_sign
-        upper_arm = 0.52
-        lower_arm = 0.50
-        upper_leg = 0.82
-        lower_leg = 0.74
-        elbow_left = self._pose_point(shoulder_left, upper_arm, pose["front_upper_arm"], front_arm_sign)
-        hand_left = self._pose_point(elbow_left, lower_arm, pose["front_lower_arm"], front_arm_sign)
-        elbow_right = self._pose_point(shoulder_right, upper_arm, pose["back_upper_arm"], back_arm_sign)
-        hand_right = self._pose_point(elbow_right, lower_arm, pose["back_lower_arm"], back_arm_sign)
-        knee_left = self._pose_point(hip_left, upper_leg, pose["front_upper_leg"], front_leg_sign)
-        foot_left = self._pose_point(knee_left, lower_leg, pose["front_lower_leg"], front_leg_sign)
-        knee_right = self._pose_point(hip_right, upper_leg, pose["back_upper_leg"], back_leg_sign)
-        foot_right = self._pose_point(knee_right, lower_leg, pose["back_lower_leg"], back_leg_sign)
-        knee_left, knee_right = self._spread_pair(knee_left, knee_right, 0.20)
-        foot_left, foot_right = self._spread_pair(foot_left, foot_right, 0.28)
-        knee_left = self._clamp_side(knee_left, pelvis_center[0], "left", 0.05)
-        knee_right = self._clamp_side(knee_right, pelvis_center[0], "right", 0.05)
-        foot_left = self._clamp_side(foot_left, pelvis_center[0], "left", 0.09)
-        foot_right = self._clamp_side(foot_right, pelvis_center[0], "right", 0.09)
+        if pose_state is None:
+            pelvis_center = (body_state["pelvis_x"] * facing_sign, body_state["pelvis_z"])
+            chest_center = (body_state["chest_x"] * facing_sign, body_state["chest_z"])
+            neck_center = (body_state["neck_x"] * facing_sign, body_state["neck_z"])
+            head_center = (body_state["head_x"] * facing_sign, body_state["head_z"])
+            shoulder_left = (chest_center[0] - 0.25 * facing_sign, chest_center[1] + 0.22)
+            shoulder_right = (chest_center[0] + 0.25 * facing_sign, chest_center[1] + 0.22)
+            hip_left = (pelvis_center[0] - 0.11 * facing_sign, pelvis_center[1] - 0.02)
+            hip_right = (pelvis_center[0] + 0.11 * facing_sign, pelvis_center[1] - 0.02)
+            elbow_left = (shoulder_left[0] - 0.10 * facing_sign, shoulder_left[1] - 0.50)
+            hand_left = (elbow_left[0] - 0.06 * facing_sign, elbow_left[1] - 0.52)
+            elbow_right = (shoulder_right[0] + 0.10 * facing_sign, shoulder_right[1] - 0.50)
+            hand_right = (elbow_right[0] + 0.06 * facing_sign, elbow_right[1] - 0.52)
+            knee_left = (hip_left[0] - 0.03 * facing_sign, hip_left[1] - 0.82)
+            foot_left = (knee_left[0], knee_left[1] - 0.78)
+            knee_right = (hip_right[0] + 0.03 * facing_sign, hip_right[1] - 0.82)
+            foot_right = (knee_right[0], knee_right[1] - 0.78)
+            head_center = (head_center[0], head_center[1] + 0.08)
+            neck_center = (
+                chest_center[0] + (head_center[0] - chest_center[0]) * 0.36,
+                chest_center[1] + (head_center[1] - chest_center[1]) * 0.36,
+            )
+        else:
+            pelvis_center = pose_state["pelvis_center"]
+            chest_center = pose_state["chest_center"]
+            neck_center = pose_state["neck_center"]
+            head_center = pose_state["head_center"]
+            shoulder_left = pose_state["shoulder_left"]
+            shoulder_right = pose_state["shoulder_right"]
+            hip_left = pose_state["hip_left"]
+            hip_right = pose_state["hip_right"]
+            elbow_left = pose_state["elbow_left"]
+            elbow_right = pose_state["elbow_right"]
+            hand_left = pose_state["hand_left"]
+            hand_right = pose_state["hand_right"]
+            knee_left = pose_state["knee_left"]
+            knee_right = pose_state["knee_right"]
+            foot_left = pose_state["foot_left"]
+            foot_right = pose_state["foot_right"]
         upper_arm_left.setColor(*body_color)
         upper_arm_right.setColor(*body_color)
         lower_arm_left.setColor(*trim_color)
@@ -1647,14 +1602,14 @@ class PandaTrue3DRenderer:
         upper_leg_right.setColor(*body_color)
         lower_leg_left.setColor(*trim_color)
         lower_leg_right.setColor(*trim_color)
-        self._place_segment_card(upper_arm_left, shoulder_left, elbow_left, 0.18)
-        self._place_segment_card(lower_arm_left, elbow_left, hand_left, 0.14)
-        self._place_segment_card(upper_arm_right, shoulder_right, elbow_right, 0.18)
-        self._place_segment_card(lower_arm_right, elbow_right, hand_right, 0.14)
-        self._place_segment_card(upper_leg_left, hip_left, knee_left, 0.20)
-        self._place_segment_card(lower_leg_left, knee_left, foot_left, 0.15)
-        self._place_segment_card(upper_leg_right, hip_right, knee_right, 0.20)
-        self._place_segment_card(lower_leg_right, knee_right, foot_right, 0.15)
+        self._place_segment_card(upper_arm_left, shoulder_left, elbow_left, 0.14)
+        self._place_segment_card(lower_arm_left, elbow_left, hand_left, 0.10)
+        self._place_segment_card(upper_arm_right, shoulder_right, elbow_right, 0.14)
+        self._place_segment_card(lower_arm_right, elbow_right, hand_right, 0.10)
+        self._place_segment_card(upper_leg_left, hip_left, knee_left, 0.16)
+        self._place_segment_card(lower_leg_left, knee_left, foot_left, 0.12)
+        self._place_segment_card(upper_leg_right, hip_right, knee_right, 0.16)
+        self._place_segment_card(lower_leg_right, knee_right, foot_right, 0.12)
         joint_positions = {
             "shoulder_left": shoulder_left,
             "shoulder_right": shoulder_right,
@@ -1666,7 +1621,7 @@ class PandaTrue3DRenderer:
             "knee_right": knee_right,
         }
         for joint_name, joint in joints.items():
-            self._place_joint_card(joint, joint_positions[joint_name], 0.13 if "elbow" in joint_name or "knee" in joint_name else 0.20)
+            self._place_joint_card(joint, joint_positions[joint_name], 0.11 if "elbow" in joint_name or "knee" in joint_name else 0.17)
             if joint_name.startswith("shoulder") or joint_name.startswith("hip"):
                 joint.setColor(*body_color)
             else:
@@ -1687,15 +1642,19 @@ class PandaTrue3DRenderer:
         pelvis.setColor(1.0, 1.0, 1.0, 0.0)
         self._apply_texture(neck, self._rounded_rect_texture("torso-neck-mask", (34, 112), 16, alpha=1.0))
         neck.setColor(*head_color)
+        head_rotation = -body_state["head_r"]
+        face_vertical_offset = -0.08
         head_base.setColor(*head_color)
         head_base.setPos(head_center[0], 0.01, head_center[1])
-        head_base.setR(body_state["head_r"])
-        face.setPos(head_center[0], 0.03, head_center[1] - 0.06)
-        face.setR(body_state["head_r"] * 0.85)
-        ear_left.setPos(head_center[0] - 0.27 * facing_sign, -0.02, head_center[1] + 0.32)
-        ear_right.setPos(head_center[0] + 0.27 * facing_sign, -0.02, head_center[1] + 0.32)
-        ear_left.setR(body_state["head_r"])
-        ear_right.setR(body_state["head_r"])
+        head_base.setR(head_rotation)
+        face.setPos(head_center[0], 0.03, head_center[1] + face_vertical_offset)
+        face.setR(-head_rotation)
+        left_ear_offset = self._rotate_offset(-0.33 * facing_sign, 0.36, head_rotation)
+        right_ear_offset = self._rotate_offset(0.33 * facing_sign, 0.36, head_rotation)
+        ear_left.setPos(head_center[0] + left_ear_offset[0], -0.02, head_center[1] + left_ear_offset[1])
+        ear_right.setPos(head_center[0] + right_ear_offset[0], -0.02, head_center[1] + right_ear_offset[1])
+        ear_left.setR(head_rotation)
+        ear_right.setR(head_rotation)
         if face_texture is not None:
             self._apply_texture(face, face_texture)
             face.setColor(1.0, 1.0, 1.0, 1.0)
@@ -1784,22 +1743,119 @@ class PandaTrue3DRenderer:
             for row_start in range(expected_size - row_stride, -1, -row_stride)
         )
 
+    @staticmethod
+    def _round_signature(value: float, step: float = 0.05) -> float:
+        if step <= 0:
+            return round(float(value), 4)
+        return round(round(float(value) / step) * step, 3)
+
+    @staticmethod
+    def _rotate_offset(offset_x: float, offset_z: float, angle_deg: float) -> tuple[float, float]:
+        angle = math.radians(angle_deg)
+        cos_a = math.cos(angle)
+        sin_a = math.sin(angle)
+        return (
+            offset_x * cos_a - offset_z * sin_a,
+            offset_x * sin_a + offset_z * cos_a,
+        )
+
+    def _active_subtitle_signature(self, scene: dict[str, Any], time_ms: int) -> tuple[str, int, int] | None:
+        for dialogue in scene.get("dialogues", []):
+            start_ms = int(dialogue.get("start_ms", -1))
+            end_ms = int(dialogue.get("end_ms", -1))
+            if start_ms <= time_ms <= end_ms:
+                return (str(dialogue.get("speaker_id") or ""), start_ms, end_ms)
+        return None
+
+    def _has_active_effect(self, time_ms: int) -> bool:
+        for item in self._effect_instances:
+            start_ms = int(item.get("start_ms", 0) or 0)
+            end_ms = max(start_ms + 1, int(item.get("end_ms", start_ms + 1) or start_ms + 1))
+            if start_ms <= time_ms <= end_ms:
+                return True
+        return False
+
+    def _actor_frame_signature(self, scene: dict[str, Any], actor_item: dict[str, Any], time_ms: int) -> tuple[Any, ...]:
+        actor_id = str(actor_item.get("actor_id") or "")
+        spawn = actor_item.get("spawn", {}) or {}
+        x = float(spawn.get("x", 0.0) or 0.0)
+        z = float(spawn.get("z", 0.0) or 0.0)
+        expression = self._expression_for_actor(scene, actor_id, time_ms)
+        talking = self._is_actor_talking(scene, actor_id, time_ms)
+        active_beat = self._active_beat(scene, actor_id, time_ms)
+        facing = str((active_beat or {}).get("facing") or actor_item.get("facing") or "right").strip().lower()
+        facing_sign = -1.0 if facing == "left" else 1.0
+        if active_beat:
+            start_ms = int(active_beat.get("start_ms", 0) or 0)
+            end_ms = max(start_ms + 1, int(active_beat.get("end_ms", start_ms + 1) or start_ms + 1))
+            beat_ratio = (time_ms - start_ms) / max(1.0, float(end_ms - start_ms))
+            if active_beat.get("x0") is not None and active_beat.get("x1") is not None:
+                x = self._lerp(float(active_beat.get("x0", x) or x), float(active_beat.get("x1", x) or x), self._ease_in_out(beat_ratio))
+        pose_state = self._pose_body_state(active_beat, time_ms, facing_sign) if active_beat and active_beat.get("pose_track_path") else None
+        if pose_state is None:
+            return (
+                actor_id,
+                self._round_signature(x, 0.08),
+                self._round_signature(z, 0.08),
+                expression,
+                "talk" if talking else "still",
+                facing,
+                int(time_ms // 120) if talking else 0,
+            )
+        return (
+            actor_id,
+            self._round_signature(x, 0.08),
+            self._round_signature(z, 0.08),
+            expression,
+            "talk" if talking else "pose",
+            facing,
+            int(time_ms // 120) if talking else 0,
+            self._round_signature(pose_state["pelvis_center"][0], 0.06),
+            self._round_signature(pose_state["pelvis_center"][1], 0.06),
+            self._round_signature(pose_state["chest_center"][0], 0.06),
+            self._round_signature(pose_state["chest_center"][1], 0.06),
+            self._round_signature(pose_state["head_center"][0], 0.06),
+            self._round_signature(pose_state["head_center"][1], 0.06),
+            self._round_signature(pose_state["torso_r"], 4.0),
+            self._round_signature(pose_state["head_r"], 4.0),
+        )
+
+    def _frame_cache_signature(self, scene: dict[str, Any], time_ms: int) -> tuple[Any, ...] | None:
+        if self._has_active_effect(time_ms):
+            return None
+        camera = self._camera_state(scene, time_ms)
+        return (
+            str(scene.get("id") or ""),
+            self._active_subtitle_signature(scene, time_ms),
+            self._round_signature(camera["x"], 0.04),
+            self._round_signature(camera["z"], 0.04),
+            self._round_signature(camera["zoom"], 0.04),
+            tuple(self._actor_frame_signature(scene, actor, time_ms) for actor in scene.get("actors", [])),
+        )
+
     def _apply_camera(self, scene: dict[str, Any], time_ms: int) -> None:
         state = self._camera_state(scene, time_ms)
         room = self._room_dims
-        distance = max(room["depth"] * 3.35, room["width"] * 1.48)
+        distance = max(room["depth"] * 2.58, room["width"] * 1.12)
+        floor_z = -room["height"] / 2.0 + room["floor_thickness"] / 2.0
+        shoulder_level_z = floor_z + room["height"] * 0.29
         cam_x = state["x"] * 0.70
         cam_y = -distance / max(0.55, state["zoom"])
-        cam_z = room["height"] * 0.12 + state["z"] * 0.85
-        self._lens.setFov(max(24.0, 44.0 / max(0.5, state["zoom"])))
+        cam_z = shoulder_level_z + state["z"] * 0.12
+        self._lens.setFov(max(21.5, 37.0 / max(0.5, state["zoom"])))
         self.base.camera.setPos(cam_x, cam_y, cam_z)
-        self.base.camera.lookAt(state["x"] * 0.25, 0.0, 0.35 + state["z"] * 0.12)
+        self.base.camera.lookAt(state["x"] * 0.22, 0.0, shoulder_level_z + room["height"] * 0.18 + state["z"] * 0.10)
         if self.fast_card_mode:
             self.skybox_root.setPos(cam_x, cam_y, cam_z)
 
     def capture_scene_frame(self, scene: dict[str, Any], time_ms: int, raw_rgb: bool = False) -> bytes:
         self._prepare_scene(scene)
         self._current_scene = scene
+        frame_signature = None
+        if self.fast_card_mode and raw_rgb:
+            frame_signature = self._frame_cache_signature(scene, time_ms)
+            if frame_signature is not None and frame_signature == self._last_frame_signature and self._last_frame_rgb is not None:
+                return self._last_frame_rgb
         if self.show_actor_labels:
             self._detach_children(self.label_root)
         self._apply_camera(scene, time_ms)
@@ -1819,10 +1875,16 @@ class PandaTrue3DRenderer:
         if raw_rgb:
             payload = self._capture_scene_frame_rgb()
             if payload:
+                if self.fast_card_mode:
+                    self._last_frame_signature = frame_signature
+                    self._last_frame_rgb = payload
                 return payload
             self.base.graphicsEngine.renderFrame()
             payload = self._capture_scene_frame_rgb()
             if payload:
+                if self.fast_card_mode:
+                    self._last_frame_signature = frame_signature
+                    self._last_frame_rgb = payload
                 return payload
             raise RuntimeError("failed to capture raw RGB scene frame")
         image = self._core["PNMImage"]()
