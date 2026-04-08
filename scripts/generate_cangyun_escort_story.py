@@ -13,18 +13,30 @@ from functools import lru_cache
 from pathlib import Path
 
 import edge_tts
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageSequence
 
 import generate_actions_pose_reconstruction as poseviz
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-TMP_DIR = ROOT_DIR / "tmp" / "direct_runs" / "cangyun_escort_story"
+TMP_ROOT = ROOT_DIR / "tmp" / "direct_runs" / "cangyun_escort_story"
+TMP_DIR = TMP_ROOT / "normal"
 OUTPUT_DEFAULT = ROOT_DIR / "outputs" / "cangyun_escort_story.mp4"
-FPS = 24
-WIDTH = 960
-HEIGHT = 540
-TITLE = "苍云镖路"
+DEFAULT_FPS = 24
+FAST_FPS = 12
+FAST2_FPS = 8
+FAST3_FPS = 6
+DEFAULT_WIDTH = 960
+DEFAULT_HEIGHT = 540
+FAST_WIDTH = DEFAULT_WIDTH
+FAST_HEIGHT = DEFAULT_HEIGHT
+FAST2_WIDTH = 640
+FAST2_HEIGHT = 360
+FAST3_WIDTH = 480
+FAST3_HEIGHT = 270
+WIDTH = DEFAULT_WIDTH
+HEIGHT = DEFAULT_HEIGHT
+TITLE = "寒江断令"
 GROUND_Y = HEIGHT * 0.82
 TALK_GAP_S = 0.28
 TALK_MOUTH_CYCLE_FRAMES = 4
@@ -33,6 +45,44 @@ FONT_BOLD = Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc")
 ACTION_TRACKS = {"拳击", "翻跟头gif", "人物A飞踢倒人物B", "舞剑", "跑", "连续后空翻", "降龙十八掌", "鲤鱼打挺"}
 LEG_POINTS = {"left_hip", "right_hip", "left_knee", "right_knee", "left_ankle", "right_ankle"}
 ARM_POINTS = {"left_shoulder", "right_shoulder", "left_elbow", "right_elbow", "left_wrist", "right_wrist"}
+EFFECT_DENSITY = 1.0
+EFFECT_PLAYBACK_RATE = 2.8
+EFFECT_ALPHA_MIN = 220
+EFFECT_ALPHA_MAX = 255
+RENDER_PROFILE = "normal"
+EFFECT_ONE_SHOT_DURATION_S: dict[str, float] = {
+    "rain": 2.2,
+    "wind": 2.0,
+    "impact": 1.1,
+    "slash": 1.0,
+    "thunder": 1.3,
+    "fire": 1.8,
+    "burst": 1.1,
+    "embers": 1.6,
+    "dust": 1.5,
+}
+EFFECT_AUDIO_HINTS: dict[str, tuple[str, ...]] = {
+    "rain": ("暴雨", "雨"),
+    "wind": ("风",),
+    "impact": ("击中", "打中", "拳"),
+    "slash": ("刀", "剑", "金属"),
+    "thunder": ("打雷", "雷"),
+    "fire": ("爆炸", "爆破", "火"),
+    "burst": ("打斗", "击中", "拳", "爆"),
+    "embers": ("心脏", "怦怦"),
+    "dust": ("心脏", "怦怦"),
+}
+EFFECT_ASSET_MAP: dict[str, tuple[str, tuple[float, float, float, float], float]] = {
+    "rain": ("电闪雷鸣", (0.0, 0.0, 1.0, 1.0), 0.28),
+    "wind": ("风起云涌", (0.0, 0.0, 1.0, 1.0), 0.22),
+    "impact": ("命中特效", (0.0, 0.0, 1.0, 1.0), 0.55),
+    "slash": ("银河旋转特效", (0.0, 0.0, 1.0, 1.0), 0.32),
+    "thunder": ("电闪雷鸣", (0.0, 0.0, 1.0, 1.0), 0.30),
+    "fire": ("熊熊大火", (0.0, 0.0, 1.0, 1.0), 0.34),
+    "burst": ("爆炸特效", (0.0, 0.0, 1.0, 1.0), 0.32),
+    "embers": ("启动大招特效", (0.0, 0.0, 1.0, 1.0), 0.18),
+    "dust": ("夕阳武士", (0.0, 0.0, 1.0, 1.0), 0.16),
+}
 
 
 @dataclass(frozen=True)
@@ -96,206 +146,206 @@ class ScheduledLine:
 SCENES: list[SceneSpec] = [
     SceneSpec(
         scene_id="01",
-        title="夜领血书",
+        title="雪夜遗令",
         actors=(
-            ActorSpec("xie", "谢长风", "farmer-old", "zh-CN-YunjianNeural", "放松站立", "serious", -220, 0.84),
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "站立", "focused", 0, 0.98),
-            ActorSpec("su", "苏清遥", "npc-girl", "zh-CN-XiaoxiaoNeural", "站立", "neutral", 230, 0.88),
+            ActorSpec("shen", "沈孤鸿", "farmer-old", "zh-CN-YunjianNeural", "放松站立", "serious", -220, 0.82),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "站立", "focused", 0, 0.96),
+            ActorSpec("ning", "宁听雪", "face-13", "zh-CN-XiaoxiaoNeural", "站立", "neutral", 230, 0.88),
         ),
         lines=(
-            LineSpec("xie", "苍云关外三营将变，只有这封血书，能证陈堂主勾结铁无锋。", "serious"),
-            LineSpec("lin", "师父放心，血书不入敌手，我也不会倒在半路。", "focused"),
-            LineSpec("su", "我管封匣和药囊，你负责出刀。今夜我们就离城。", "focused"),
+            LineSpec("shen", "断龙令今夜必须送到白鹿关，迟一刻，关外三营都会被假军令调走。", "serious"),
+            LineSpec("lu", "师叔把令箭交给我，我便护它到天亮。", "focused"),
+            LineSpec("ning", "我带药囊和封蜡，路上若有人查匣，我来替你周旋。", "neutral"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "铁血丹心.mp3",
-        background_top=(54, 49, 66),
-        background_bottom=(16, 14, 26),
-        accent=(242, 216, 158),
+        background_top=(52, 47, 67),
+        background_bottom=(15, 13, 24),
+        accent=(242, 220, 173),
         effect="embers",
-        sfx=(SfxCue(ROOT_DIR / "assets" / "audio" / "心脏怦怦跳.wav", 0.7, 0.12),),
+        sfx=(SfxCue(ROOT_DIR / "assets" / "audio" / "心脏怦怦跳.wav", 0.8, 0.12),),
     ),
     SceneSpec(
         scene_id="02",
-        title="晨门启程",
+        title="镖局封门",
         actors=(
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "站立", "neutral", -180, 0.98),
-            ActorSpec("su", "苏清遥", "npc-girl", "zh-CN-XiaoxiaoNeural", "站立", "smile", 30, 0.88),
-            ActorSpec("han", "韩七", "detective-sleek", "zh-CN-YunjianNeural", "掐腰站立", "skeptical", 250, 0.9),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "站立", "serious", -200, 0.96),
+            ActorSpec("ning", "宁听雪", "face-13", "zh-CN-XiaoxiaoNeural", "站立", "skeptical", 20, 0.88),
+            ActorSpec("han", "韩照", "detective-sleek", "zh-CN-YunjianNeural", "放松站立", "focused", 250, 0.9),
         ),
         lines=(
-            LineSpec("han", "城门外三十里有雨桥，黑沙堂最爱在那里截镖。", "skeptical"),
-            LineSpec("lin", "那就别走官道，先绕旧河埠，再折进竹林。", "neutral"),
-            LineSpec("su", "真匣藏在马鞍底，给他们留下一个假的。", "smile"),
+            LineSpec("han", "前后门都换成了叶藏锋的人，明面上是护院，脚下站位却像围杀。", "focused"),
+            LineSpec("ning", "那就不走门，后井有条旧水道，能通到灯市边上的染坊。", "skeptical"),
+            LineSpec("lu", "你在前探路，我背令匣走井道。今夜谁也别回头。", "serious"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "男儿当自强.mp3",
-        background_top=(231, 216, 185),
-        background_bottom=(164, 126, 79),
-        accent=(117, 66, 30),
+        background_top=(219, 203, 170),
+        background_bottom=(149, 113, 73),
+        accent=(121, 70, 34),
         effect="wind",
-        sfx=(SfxCue(ROOT_DIR / "assets" / "audio" / "潺潺流水声.wav", 0.0, 0.08),),
+        sfx=(SfxCue(ROOT_DIR / "assets" / "audio" / "潺潺流水声.wav", 0.1, 0.08),),
     ),
     SceneSpec(
         scene_id="03",
-        title="客栈探风",
+        title="灯市换匣",
         actors=(
-            ActorSpec("inn", "店家", "farmer-old", "zh-CN-YunjianNeural", "放松站立", "nervous", -190, 0.82),
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "站立", "focused", 10, 0.98),
-            ActorSpec("su", "苏清遥", "npc-girl", "zh-CN-XiaoxiaoNeural", "坐下", "skeptical", 240, 0.84),
+            ActorSpec("shop", "染坊娘子", "face-15", "zh-CN-XiaoxiaoNeural", "坐下", "nervous", -200, 0.84),
+            ActorSpec("ning", "宁听雪", "face-13", "zh-CN-XiaoxiaoNeural", "站立", "smile", 20, 0.88),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "站立", "focused", 250, 0.96),
         ),
         lines=(
-            LineSpec("inn", "昨夜有人包下后院，只问两件事，苍云镖局和苏姑娘。", "nervous"),
-            LineSpec("lin", "果然有人先我们一步布网。", "focused"),
-            LineSpec("su", "那就让他们盯着假匣，我们从后窗走。", "skeptical"),
+            LineSpec("shop", "你们来得比约定早，假匣和旧封条都备好了，只是街口多了三拨生面孔。", "nervous"),
+            LineSpec("ning", "越热闹越好，他们盯着我手里的假货，才看不见你背后的真匣。", "smile"),
+            LineSpec("lu", "换完就走，灯一灭，整条街都会变成他们的网。", "focused"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "历史的天空-古筝-三国演义片尾曲.mp3",
-        background_top=(208, 184, 150),
-        background_bottom=(112, 83, 60),
-        accent=(250, 231, 202),
+        background_top=(203, 178, 143),
+        background_bottom=(108, 79, 56),
+        accent=(248, 230, 204),
         effect="dust",
-        sfx=(SfxCue(ROOT_DIR / "assets" / "audio" / "心脏怦怦跳.wav", 1.8, 0.1),),
+        sfx=(SfxCue(ROOT_DIR / "assets" / "audio" / "心脏怦怦跳.wav", 1.9, 0.1),),
     ),
     SceneSpec(
         scene_id="04",
-        title="雨桥截镖",
+        title="雨巷截杀",
         actors=(
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "站立", "angry", -180, 0.98, True),
-            ActorSpec("su", "苏清遥", "npc-girl", "zh-CN-XiaoxiaoNeural", "站立", "focused", 20, 0.88),
-            ActorSpec("sha", "杀手", "official-minister", "zh-CN-YunjianNeural", "拳击", "angry", 260, 0.9),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "站立", "angry", -190, 0.96, True),
+            ActorSpec("ning", "宁听雪", "face-13", "zh-CN-XiaoxiaoNeural", "跑", "focused", 20, 0.88),
+            ActorSpec("yuan", "袁烈", "emperor-ming", "zh-CN-YunjianNeural", "拳击", "angry", 260, 0.92),
         ),
         lines=(
-            LineSpec("sha", "黑沙堂只要匣子，你们把命留下就够了。", "angry", "拳击"),
-            LineSpec("lin", "货在我身后，命在我手里。你来拿试试。", "angry", "拳击"),
-            LineSpec("su", "左边桥柱有火油，我点灯，你出刀。", "focused", "跑"),
+            LineSpec("yuan", "把匣子放下，我只断你们一只手。再跑，我就收两条命。", "angry", "拳击"),
+            LineSpec("lu", "令匣你碰不到，今夜这条巷子就是你的坟。", "angry", "拳击"),
+            LineSpec("ning", "右边墙头有空档，我扔火粉逼他抬头，你借势出拳。", "focused", "跑"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "最后之战-热血-卢冠廷.mp3",
-        background_top=(58, 78, 108),
-        background_bottom=(12, 16, 28),
-        accent=(208, 230, 255),
+        background_top=(57, 76, 107),
+        background_bottom=(12, 16, 27),
+        accent=(206, 228, 255),
         effect="rain",
         sfx=(
             SfxCue(ROOT_DIR / "assets" / "audio" / "暴雨.wav", 0.0, 0.18),
-            SfxCue(ROOT_DIR / "assets" / "audio" / "格斗打中.wav", 2.3, 0.82),
-            SfxCue(ROOT_DIR / "assets" / "audio" / "一拳击中.wav", 4.4, 0.95),
+            SfxCue(ROOT_DIR / "assets" / "audio" / "格斗打中.wav", 2.4, 0.82),
+            SfxCue(ROOT_DIR / "assets" / "audio" / "一拳击中.wav", 4.1, 0.94),
         ),
     ),
     SceneSpec(
         scene_id="05",
-        title="荒庙验箭",
+        title="河仓疗伤",
         actors=(
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "蹲下", "pained", -170, 0.94),
-            ActorSpec("su", "苏清遥", "npc-girl", "zh-CN-XiaoxiaoNeural", "朝右跪坐", "focused", 70, 0.86),
-            ActorSpec("han", "韩七", "detective-sleek", "zh-CN-YunjianNeural", "放松站立", "serious", 280, 0.9),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "蹲下", "pained", -190, 0.92),
+            ActorSpec("ning", "宁听雪", "face-13", "zh-CN-XiaoxiaoNeural", "朝右跪坐", "focused", 40, 0.86),
+            ActorSpec("han", "韩照", "detective-sleek", "zh-CN-YunjianNeural", "放松站立", "serious", 260, 0.9),
         ),
         lines=(
-            LineSpec("su", "箭簇上有衙门火漆，不是草寇的手笔。", "focused"),
-            LineSpec("han", "陈堂主果然和铁无锋通气，镖局里还有内线。", "serious"),
-            LineSpec("lin", "从现在起，除了我们三个，谁也不知道真血书在哪。", "pained"),
+            LineSpec("ning", "刀口里有麻骨散，袁烈不是来抢匣，是想先废你的右臂。", "focused"),
+            LineSpec("han", "码头外沿多了军中暗哨，能调得动他们的人，只能是叶藏锋。", "serious"),
+            LineSpec("lu", "那就顺着这条线往前查，今夜先活下来，明夜再拔他的根。", "pained"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "思君黯然-天龙八部-悲伤.mp3",
         background_top=(70, 59, 62),
         background_bottom=(22, 18, 24),
-        accent=(255, 198, 162),
-        effect="fire",
-        sfx=(SfxCue(ROOT_DIR / "assets" / "audio" / "心脏怦怦跳.wav", 1.2, 0.12),),
+        accent=(255, 201, 166),
+        effect="embers",
+        sfx=(SfxCue(ROOT_DIR / "assets" / "audio" / "心脏怦怦跳.wav", 1.3, 0.12),),
     ),
     SceneSpec(
         scene_id="06",
-        title="江渡疑云",
+        title="义庄验尸",
         actors=(
-            ActorSpec("qiu", "秋伯", "farmer-old", "zh-CN-YunjianNeural", "坐下", "thinking", -200, 0.82),
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "站立", "skeptical", 20, 0.98),
-            ActorSpec("su", "苏清遥", "npc-girl", "zh-CN-XiaoxiaoNeural", "站立", "neutral", 240, 0.88),
+            ActorSpec("han", "韩照", "detective-sleek", "zh-CN-YunjianNeural", "站立", "focused", -190, 0.9),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "站立", "skeptical", 10, 0.96),
+            ActorSpec("ning", "宁听雪", "face-13", "zh-CN-XiaoxiaoNeural", "站立", "serious", 250, 0.88),
         ),
         lines=(
-            LineSpec("qiu", "你们昨夜刚过桥，桥头就先亮了灯。这行程，是从城里漏出去的。", "thinking"),
-            LineSpec("lin", "城里知情的只有师父、韩七和陈堂主。", "skeptical"),
-            LineSpec("su", "韩七跟了我们一路，我信他。剩下那个，就该查了。", "neutral"),
+            LineSpec("han", "死者腰牌背面刻着白鹿关仓印，叶藏锋已经把手伸到关口。", "focused"),
+            LineSpec("lu", "他若只是求财，不会动关仓和军印。断龙令背后还有更大的局。", "skeptical"),
+            LineSpec("ning", "那我们就不能只逃，要拿到能钉死他的卷册和人证。", "serious"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "芦苇荡-赵季平-大话西游.mp3",
-        background_top=(92, 122, 132),
-        background_bottom=(33, 51, 60),
-        accent=(220, 239, 224),
+        background_top=(86, 116, 128),
+        background_bottom=(31, 49, 59),
+        accent=(220, 239, 227),
         effect="wind",
-        sfx=(SfxCue(ROOT_DIR / "assets" / "audio" / "潺潺流水声.wav", 0.0, 0.16),),
+        sfx=(SfxCue(ROOT_DIR / "assets" / "audio" / "潺潺流水声.wav", 0.0, 0.12),),
     ),
     SceneSpec(
         scene_id="07",
-        title="竹林寻踪",
+        title="竹海擒哨",
         actors=(
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "站立", "angry", -190, 0.98, True),
-            ActorSpec("han", "韩七", "detective-sleek", "zh-CN-YunjianNeural", "站立", "focused", 30, 0.9),
-            ActorSpec("liu", "探子", "official-minister", "zh-CN-YunjianNeural", "人物A飞踢倒人物B", "angry", 270, 0.86),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "站立", "angry", -190, 0.96, True),
+            ActorSpec("han", "韩照", "detective-sleek", "zh-CN-YunjianNeural", "站立", "focused", 20, 0.9),
+            ActorSpec("qian", "钱哨头", "official-minister", "zh-CN-YunjianNeural", "人物A飞踢倒人物B", "fear", 270, 0.86),
         ),
         lines=(
-            LineSpec("liu", "铁爷只要匣子，不想和你们多费口舌。", "angry", "人物A飞踢倒人物B"),
-            LineSpec("han", "你们今晨在渡口换了三批眼线，我早记下了。", "focused"),
-            LineSpec("lin", "说出接头地点，我让你走得痛快些。", "angry", "拳击"),
+            LineSpec("qian", "别打了，我只负责沿河递信，真正接匣的人在府衙案库等你们。", "fear", "人物A飞踢倒人物B"),
+            LineSpec("han", "案库夜里只开一道偏门，钥匙归叶藏锋心腹管。", "focused"),
+            LineSpec("lu", "很好，你带路。敢耍花样，我先折你的腿。", "angry", "拳击"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "杀破狼.mp3",
-        background_top=(56, 96, 64),
-        background_bottom=(16, 33, 19),
-        accent=(184, 235, 188),
+        background_top=(55, 94, 64),
+        background_bottom=(15, 31, 18),
+        accent=(185, 235, 190),
         effect="burst",
         sfx=(
             SfxCue(ROOT_DIR / "assets" / "audio" / "031_26_赤手空拳打斗的声音_爱给网_aigei_com.mp3", 1.0, 0.82),
-            SfxCue(ROOT_DIR / "assets" / "audio" / "格斗打中.wav", 3.0, 0.85),
+            SfxCue(ROOT_DIR / "assets" / "audio" / "格斗打中.wav", 3.0, 0.86),
         ),
     ),
     SceneSpec(
         scene_id="08",
-        title="潜灯入衙",
+        title="夜入案库",
         actors=(
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "站立", "focused", -180, 0.98),
-            ActorSpec("su", "苏清遥", "npc-girl", "zh-CN-XiaoxiaoNeural", "站立", "smile", 30, 0.88),
-            ActorSpec("clerk", "守册吏", "official-minister", "zh-CN-YunjianNeural", "放松站立", "skeptical", 250, 0.86),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "站立", "focused", -190, 0.96),
+            ActorSpec("ning", "宁听雪", "face-13", "zh-CN-XiaoxiaoNeural", "站立", "smile", 20, 0.88),
+            ActorSpec("clerk", "守库吏", "official-minister", "zh-CN-YunjianNeural", "放松站立", "skeptical", 260, 0.86),
         ),
         lines=(
-            LineSpec("clerk", "卷宗重地，夜里不许进人。", "skeptical"),
-            LineSpec("su", "那你就当今夜没看见我们。", "smile"),
-            LineSpec("lin", "找苍云关军粮册，凡是红章封过的，全带走。", "focused"),
+            LineSpec("clerk", "三更以后不准翻册，谁给你们的胆子闯案库。", "skeptical"),
+            LineSpec("ning", "你认清楚，是叶大人让我们来换封条。你若耽误时辰，掉脑袋的是你。", "smile"),
+            LineSpec("lu", "找白鹿关仓册、调兵票底和押印名单，一页都不能漏。", "focused"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "误入迷失森林-少年包青天.mp3",
-        background_top=(52, 62, 84),
+        background_top=(52, 61, 84),
         background_bottom=(15, 18, 33),
-        accent=(224, 235, 250),
+        accent=(224, 236, 250),
         effect="thunder",
-        sfx=(SfxCue(ROOT_DIR / "assets" / "audio" / "打雷闪电.wav", 1.6, 0.42),),
+        sfx=(SfxCue(ROOT_DIR / "assets" / "audio" / "打雷闪电.wav", 1.7, 0.42),),
     ),
     SceneSpec(
         scene_id="09",
-        title="地牢救师",
+        title="狱中救证",
         actors=(
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "站立", "angry", -190, 0.98, True),
-            ActorSpec("xie", "谢长风", "farmer-old", "zh-CN-YunjianNeural", "朝右跪坐", "serious", 10, 0.82),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "站立", "angry", -190, 0.96, True),
+            ActorSpec("qin", "秦刀", "face-17", "zh-CN-YunxiNeural", "朝右跪坐", "serious", 20, 0.88),
             ActorSpec("guard", "狱卒", "official-minister", "zh-CN-YunjianNeural", "拳击", "angry", 260, 0.86),
         ),
         lines=(
-            LineSpec("guard", "陈堂主说了，谢长风一死，所有旧案都能沉底。", "angry", "拳击"),
-            LineSpec("xie", "别管我，先把血书送去苍云关。", "serious"),
-            LineSpec("lin", "师父，我既然来了，就带你一起走。", "angry", "舞剑"),
+            LineSpec("guard", "叶大人交代过，秦刀活不到天亮，谁来都一样。", "angry", "拳击"),
+            LineSpec("qin", "仓门机括图在我脑子里，只要你们带我出去，我就能开白鹿关北门。", "serious"),
+            LineSpec("lu", "先跟我杀出去，到了外头，你再把这笔旧账一条条说清。", "angry", "舞剑"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "最后之战-热血-卢冠廷.mp3",
-        background_top=(72, 36, 28),
+        background_top=(71, 35, 28),
         background_bottom=(18, 9, 12),
         accent=(255, 208, 184),
         effect="fire",
         sfx=(
-            SfxCue(ROOT_DIR / "assets" / "audio" / "刀剑、金属碰撞（带回音）_爱给网_aigei_com.mp3", 2.0, 0.82),
-            SfxCue(ROOT_DIR / "assets" / "audio" / "格斗打中.wav", 4.0, 0.82),
+            SfxCue(ROOT_DIR / "assets" / "audio" / "刀剑、金属碰撞（带回音）_爱给网_aigei_com.mp3", 2.0, 0.84),
+            SfxCue(ROOT_DIR / "assets" / "audio" / "格斗打中.wav", 4.0, 0.84),
         ),
     ),
     SceneSpec(
         scene_id="10",
-        title="夜巷追命",
+        title="屋脊脱围",
         actors=(
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "跑", "angry", -180, 0.98, True),
-            ActorSpec("su", "苏清遥", "npc-girl", "zh-CN-XiaoxiaoNeural", "跑", "focused", 20, 0.88),
-            ActorSpec("han", "韩七", "detective-sleek", "zh-CN-YunjianNeural", "跑", "serious", 250, 0.9),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "跑", "angry", -180, 0.96, True),
+            ActorSpec("ning", "宁听雪", "face-13", "zh-CN-XiaoxiaoNeural", "跑", "focused", 20, 0.88),
+            ActorSpec("qin", "秦刀", "face-17", "zh-CN-YunxiNeural", "跑", "serious", 240, 0.88),
         ),
         lines=(
-            LineSpec("han", "后巷全是弩手，前街是刀阵，陈堂主这是要把我们困死在城里。", "serious"),
-            LineSpec("su", "我往西巷撒烟粉，你带师父走屋脊。", "focused"),
-            LineSpec("lin", "今夜先出城，明早再和他们算总账。", "angry", "跑"),
+            LineSpec("qin", "西巷全是弩手，正街又有封马，我熟悉屋檐走法，跟着我跳。", "serious"),
+            LineSpec("ning", "我在后面撒药烟，他们看不清脚下，你们先过。", "focused"),
+            LineSpec("lu", "一直翻到城西鼓楼，到了暗河口再分开换气。", "angry", "跑"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "杀破狼.mp3",
         background_top=(27, 36, 61),
@@ -303,25 +353,25 @@ SCENES: list[SceneSpec] = [
         accent=(208, 226, 255),
         effect="thunder",
         sfx=(
-            SfxCue(ROOT_DIR / "assets" / "audio" / "打雷闪电.wav", 0.9, 0.52),
+            SfxCue(ROOT_DIR / "assets" / "audio" / "打雷闪电.wav", 1.0, 0.52),
             SfxCue(ROOT_DIR / "assets" / "audio" / "暴雨.wav", 0.0, 0.16),
         ),
     ),
     SceneSpec(
         scene_id="11",
-        title="山寺逼供",
+        title="山亭对质",
         actors=(
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "站立", "serious", -180, 0.98),
-            ActorSpec("xie", "谢长风", "farmer-old", "zh-CN-YunjianNeural", "坐下", "thinking", 30, 0.82),
-            ActorSpec("liu", "探子", "official-minister", "zh-CN-YunjianNeural", "朝右跪坐", "fear", 260, 0.84),
+            ActorSpec("qin", "秦刀", "face-17", "zh-CN-YunxiNeural", "坐下", "thinking", -210, 0.86),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "站立", "serious", 10, 0.96),
+            ActorSpec("han", "韩照", "detective-sleek", "zh-CN-YunjianNeural", "站立", "focused", 250, 0.9),
         ),
         lines=(
-            LineSpec("liu", "铁无锋今夜会在断雁坡收网，陈堂主亲自押后。", "fear"),
-            LineSpec("xie", "他不是只要血书，他还要那枚开关铁券。", "thinking"),
-            LineSpec("lin", "原来他们盯的从来不是镖，是苍云关的兵门。", "serious"),
+            LineSpec("qin", "叶藏锋要的不是令箭本身，而是借断龙令打开白鹿关北仓，偷换军械。", "thinking"),
+            LineSpec("han", "所以他先灭案库旧卷，再灭你这个做过仓匠的人证。", "focused"),
+            LineSpec("lu", "只要把你和卷册一起送到关前，他这条线就再也藏不住。", "serious"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "思君黯然-天龙八部-悲伤.mp3",
-        background_top=(66, 61, 70),
+        background_top=(67, 61, 71),
         background_bottom=(22, 20, 28),
         accent=(231, 214, 188),
         effect="embers",
@@ -331,14 +381,14 @@ SCENES: list[SceneSpec] = [
         scene_id="12",
         title="绝壁采药",
         actors=(
-            ActorSpec("su", "苏清遥", "npc-girl", "zh-CN-XiaoxiaoNeural", "蹲下", "pained", -180, 0.84),
-            ActorSpec("yao", "药娘", "npc-girl", "zh-CN-XiaoxiaoNeural", "坐下", "neutral", 40, 0.82),
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "站立", "focused", 250, 0.98),
+            ActorSpec("ning", "宁听雪", "face-13", "zh-CN-XiaoxiaoNeural", "蹲下", "pained", -180, 0.84),
+            ActorSpec("yao", "药娘", "face-15", "zh-CN-XiaoxiaoNeural", "坐下", "neutral", 40, 0.82),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "站立", "focused", 250, 0.96),
         ),
         lines=(
-            LineSpec("yao", "你中了裂骨散，不到寅时解毒，手脚都会废。", "neutral"),
-            LineSpec("lin", "药在哪，你说。", "focused"),
-            LineSpec("su", "断雁坡就在前面，别为我误了送信时辰。", "pained"),
+            LineSpec("yao", "你替陆青川挡了一记透骨针，再不解毒，明日拿刀的人就变成你自己。", "neutral"),
+            LineSpec("lu", "药采到了就走，白鹿关只剩半日路程，我们耽误不起。", "focused"),
+            LineSpec("ning", "我还能撑，等把令箭送进关门，你再逼我喝药不迟。", "pained"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "莫失莫忘.mp3",
         background_top=(170, 182, 200),
@@ -349,16 +399,16 @@ SCENES: list[SceneSpec] = [
     ),
     SceneSpec(
         scene_id="13",
-        title="雪坡埋伏",
+        title="雪岭伏杀",
         actors=(
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "站立", "angry", -190, 0.98, True),
-            ActorSpec("su", "苏清遥", "npc-girl", "zh-CN-XiaoxiaoNeural", "站立", "focused", 30, 0.88),
-            ActorSpec("tie", "铁无锋", "emperor-ming", "zh-CN-YunjianNeural", "拳击", "angry", 270, 0.92),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "站立", "angry", -190, 0.96, True),
+            ActorSpec("ning", "宁听雪", "face-13", "zh-CN-XiaoxiaoNeural", "站立", "focused", 30, 0.88),
+            ActorSpec("yuan", "袁烈", "emperor-ming", "zh-CN-YunjianNeural", "拳击", "angry", 270, 0.92),
         ),
         lines=(
-            LineSpec("tie", "一封血书，就想撬开苍云关？你们太天真了。", "angry", "拳击"),
-            LineSpec("su", "你敢带人围坡，就说明陈堂主的退路还没布好。", "focused"),
-            LineSpec("lin", "退路留给你自己吧，今天我先替雨桥那几条命讨债。", "angry", "拳击"),
+            LineSpec("yuan", "叶大人算得真准，你们果然会走雪岭近道。把秦刀留下，我饶你们一个全尸。", "angry", "拳击"),
+            LineSpec("ning", "你敢堵在这里，说明叶藏锋还没拿到令箭，他比你更急。", "focused"),
+            LineSpec("lu", "那我就先拿你的命，去换他今晚的胆寒。", "angry", "拳击"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "男儿当自强.mp3",
         background_top=(174, 184, 198),
@@ -366,22 +416,22 @@ SCENES: list[SceneSpec] = [
         accent=(255, 234, 204),
         effect="impact",
         sfx=(
-            SfxCue(ROOT_DIR / "assets" / "audio" / "一拳击中.wav", 2.5, 0.95),
+            SfxCue(ROOT_DIR / "assets" / "audio" / "一拳击中.wav", 2.6, 0.95),
             SfxCue(ROOT_DIR / "assets" / "audio" / "格斗打中.wav", 4.5, 0.88),
         ),
     ),
     SceneSpec(
         scene_id="14",
-        title="旧阁焚卷",
+        title="断塔焚册",
         actors=(
-            ActorSpec("su", "苏清遥", "npc-girl", "zh-CN-XiaoxiaoNeural", "站立", "angry", -180, 0.88),
-            ActorSpec("han", "韩七", "detective-sleek", "zh-CN-YunjianNeural", "站立", "focused", 20, 0.9),
-            ActorSpec("chen", "陈堂主", "official-minister", "zh-CN-YunjianNeural", "放松站立", "cold", 260, 0.88),
+            ActorSpec("han", "韩照", "detective-sleek", "zh-CN-YunjianNeural", "站立", "focused", -180, 0.9),
+            ActorSpec("ye", "叶藏锋", "official-minister", "zh-CN-YunjianNeural", "放松站立", "cold", 20, 0.88),
+            ActorSpec("ning", "宁听雪", "face-13", "zh-CN-XiaoxiaoNeural", "站立", "angry", 260, 0.88),
         ),
         lines=(
-            LineSpec("chen", "只要旧卷一烧，谢长风当年的口供就成了疯话。", "cold"),
-            LineSpec("han", "你借镖路运兵器，又借官印灭口，这笔账今夜算不清了。", "focused"),
-            LineSpec("su", "烧吧，火越大，城里的人越知道你心虚。", "angry"),
+            LineSpec("ye", "旧册一烧，北仓失印的事就只剩流言。你们拿什么进关告我。", "cold"),
+            LineSpec("han", "卷册能烧，押印人和仓门图却在我们手里。你越急，越像做贼。", "focused"),
+            LineSpec("ning", "火光照得满城都能看见，你这一烧，是替我们把人都喊醒了。", "angry"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "暗夜浮香-天龙八部背景乐-悲伤.mp3",
         background_top=(96, 32, 24),
@@ -392,19 +442,19 @@ SCENES: list[SceneSpec] = [
     ),
     SceneSpec(
         scene_id="15",
-        title="渡口换船",
+        title="暗河换船",
         actors=(
-            ActorSpec("qiu", "秋伯", "farmer-old", "zh-CN-YunjianNeural", "放松站立", "smile", -190, 0.82),
-            ActorSpec("xie", "谢长风", "farmer-old", "zh-CN-YunjianNeural", "坐下", "neutral", 40, 0.8),
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "站立", "neutral", 260, 0.98),
+            ActorSpec("boat", "乌篷翁", "farmer-old", "zh-CN-YunjianNeural", "坐下", "thinking", -190, 0.82),
+            ActorSpec("qin", "秦刀", "face-17", "zh-CN-YunxiNeural", "坐下", "serious", 30, 0.86),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "站立", "neutral", 250, 0.96),
         ),
         lines=(
-            LineSpec("qiu", "官船都被封了，只剩我这条破渡船，能走暗水。", "smile"),
-            LineSpec("xie", "过了寒沙湾，再有半日就到苍云关。", "neutral"),
-            LineSpec("lin", "今夜多谢秋伯，若我还能回来，替你重修这一渡。", "neutral"),
+            LineSpec("boat", "官道都断了，只剩暗河还能贴着山根走，天亮前就能把你们送到关下。", "thinking"),
+            LineSpec("qin", "到了白鹿关南坡，我能认出藏机括钥的旧砖。", "serious"),
+            LineSpec("lu", "过了这道水，前面就只剩硬闯。大家把最后的力气留到关前。", "neutral"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "芦苇荡-赵季平-大话西游.mp3",
-        background_top=(89, 122, 142),
+        background_top=(88, 121, 141),
         background_bottom=(27, 46, 63),
         accent=(229, 241, 228),
         effect="wind",
@@ -412,16 +462,16 @@ SCENES: list[SceneSpec] = [
     ),
     SceneSpec(
         scene_id="16",
-        title="长街鸣刀",
+        title="长街断后",
         actors=(
-            ActorSpec("han", "韩七", "detective-sleek", "zh-CN-YunjianNeural", "拳击", "angry", -190, 0.9, True),
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "跑", "focused", 20, 0.98),
-            ActorSpec("su", "苏清遥", "npc-girl", "zh-CN-XiaoxiaoNeural", "跑", "focused", 240, 0.88),
+            ActorSpec("han", "韩照", "detective-sleek", "zh-CN-YunjianNeural", "拳击", "angry", -190, 0.9, True),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "跑", "focused", 20, 0.96),
+            ActorSpec("ning", "宁听雪", "face-13", "zh-CN-XiaoxiaoNeural", "跑", "focused", 240, 0.88),
         ),
         lines=(
-            LineSpec("han", "我留在街口断后，你们把人和证物送到关前！", "angry", "拳击"),
-            LineSpec("su", "韩七，活着来寒寺会合！", "focused", "跑"),
-            LineSpec("lin", "一炷香后不见你，我就回头拆了这条街！", "focused", "跑"),
+            LineSpec("han", "前街我来挡，你们带秦刀和令匣冲关，别让我的血白流。", "angry", "拳击"),
+            LineSpec("ning", "韩照，最多一炷香，若你不来，我们就在关楼上替你点第一盏灯。", "focused", "跑"),
+            LineSpec("lu", "守住自己这口气，关门一开，我回头接你。", "focused", "跑"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "杀破狼.mp3",
         background_top=(64, 55, 74),
@@ -429,22 +479,22 @@ SCENES: list[SceneSpec] = [
         accent=(244, 223, 193),
         effect="slash",
         sfx=(
-            SfxCue(ROOT_DIR / "assets" / "audio" / "刀剑、金属碰撞（带回音）_爱给网_aigei_com.mp3", 1.7, 0.82),
-            SfxCue(ROOT_DIR / "assets" / "audio" / "031_26_赤手空拳打斗的声音_爱给网_aigei_com.mp3", 3.6, 0.88),
+            SfxCue(ROOT_DIR / "assets" / "audio" / "刀剑、金属碰撞（带回音）_爱给网_aigei_com.mp3", 1.8, 0.84),
+            SfxCue(ROOT_DIR / "assets" / "audio" / "031_26_赤手空拳打斗的声音_爱给网_aigei_com.mp3", 3.7, 0.88),
         ),
     ),
     SceneSpec(
         scene_id="17",
-        title="寒寺密誓",
+        title="寒寺托证",
         actors=(
-            ActorSpec("xie", "谢长风", "farmer-old", "zh-CN-YunjianNeural", "坐下", "thinking", -210, 0.82),
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "站立", "serious", 10, 0.98),
-            ActorSpec("su", "苏清遥", "npc-girl", "zh-CN-XiaoxiaoNeural", "站立", "focused", 240, 0.88),
+            ActorSpec("shen", "沈孤鸿", "farmer-old", "zh-CN-YunjianNeural", "坐下", "thinking", -210, 0.82),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "站立", "serious", 10, 0.96),
+            ActorSpec("ning", "宁听雪", "face-13", "zh-CN-XiaoxiaoNeural", "站立", "focused", 240, 0.88),
         ),
         lines=(
-            LineSpec("xie", "二十年前苍云关兵变，陈堂主靠假军令，屠了整营斥候。", "thinking"),
-            LineSpec("lin", "所以你把血书藏进镖路二十年，只等今日送到关前。", "serious"),
-            LineSpec("su", "那我们就把这条路走到底，谁拦谁死。", "focused"),
+            LineSpec("shen", "二十年前我守过北仓，叶藏锋那时就偷换军械，死的人一直压在雪里。", "thinking"),
+            LineSpec("lu", "今夜把令箭、仓册、人证和你的口供一并送上关楼，他就再也赖不掉。", "serious"),
+            LineSpec("ning", "旧案埋得再深，只要见了天光，就会自己喊冤。", "focused"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "仙剑情缘.mp3",
         background_top=(58, 62, 89),
@@ -455,16 +505,16 @@ SCENES: list[SceneSpec] = [
     ),
     SceneSpec(
         scene_id="18",
-        title="关前拒门",
+        title="关前拒令",
         actors=(
-            ActorSpec("feng", "封校尉", "official-minister", "zh-CN-YunjianNeural", "放松站立", "skeptical", -190, 0.86),
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "站立", "angry", 20, 0.98),
-            ActorSpec("su", "苏清遥", "npc-girl", "zh-CN-XiaoxiaoNeural", "站立", "angry", 240, 0.88),
+            ActorSpec("feng", "封守毅", "general-guard", "zh-CN-YunxiNeural", "放松站立", "skeptical", -190, 0.92),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "站立", "angry", 20, 0.96),
+            ActorSpec("ning", "宁听雪", "face-13", "zh-CN-XiaoxiaoNeural", "站立", "angry", 240, 0.88),
         ),
         lines=(
-            LineSpec("feng", "关门已封，今夜任何文书都不得入关。", "skeptical"),
-            LineSpec("su", "你若不看这半卷军粮册，明天开的就不是关门，是棺材板。", "angry"),
-            LineSpec("lin", "铁无锋的人就在后面。等他们到了，你连后悔都来不及。", "angry"),
+            LineSpec("feng", "关门夜封，任何私令都不能验。你们若再上前，我只能按闯关论。", "skeptical"),
+            LineSpec("ning", "你若再迟半刻，明早开仓的人就会发现军械全成了废铁。", "angry"),
+            LineSpec("lu", "后面追兵已到，你是守规矩，还是守白鹿关，今夜就得选。", "angry"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "观音降临-高潮版.mp3",
         background_top=(88, 103, 124),
@@ -475,16 +525,16 @@ SCENES: list[SceneSpec] = [
     ),
     SceneSpec(
         scene_id="19",
-        title="断碑决战",
+        title="关楼决战",
         actors=(
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "站立", "angry", -190, 0.98, True),
-            ActorSpec("tie", "铁无锋", "emperor-ming", "zh-CN-YunjianNeural", "拳击", "angry", 170, 0.92),
-            ActorSpec("chen", "陈堂主", "official-minister", "zh-CN-YunjianNeural", "放松站立", "cold", 330, 0.84),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "站立", "angry", -190, 0.96, True),
+            ActorSpec("yuan", "袁烈", "emperor-ming", "zh-CN-YunjianNeural", "拳击", "angry", 170, 0.92),
+            ActorSpec("ye", "叶藏锋", "official-minister", "zh-CN-YunjianNeural", "放松站立", "cold", 330, 0.84),
         ),
         lines=(
-            LineSpec("chen", "苍云关一开，你们谁也护不住那封血书。", "cold"),
-            LineSpec("tie", "我挡住林沧州，你去杀谢长风！", "angry", "拳击"),
-            LineSpec("lin", "你们今天谁也别想越过这块断碑。", "angry", "舞剑"),
+            LineSpec("ye", "只要关门不开，今晚的一切都能算成匪患。陆青川，你赢不了朝里的手。", "cold"),
+            LineSpec("yuan", "你去夺令匣，我来打碎他的骨头。", "angry", "拳击"),
+            LineSpec("lu", "你们要的是整座关城，我要的只是让所有人看清你们的脸。", "angry", "舞剑"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "最后之战-热血-卢冠廷.mp3",
         background_top=(108, 30, 28),
@@ -493,22 +543,22 @@ SCENES: list[SceneSpec] = [
         effect="impact",
         sfx=(
             SfxCue(ROOT_DIR / "assets" / "audio" / "刀剑、金属碰撞（带回音）_爱给网_aigei_com.mp3", 2.0, 0.86),
-            SfxCue(ROOT_DIR / "assets" / "audio" / "格斗打中.wav", 4.7, 0.86),
+            SfxCue(ROOT_DIR / "assets" / "audio" / "格斗打中.wav", 4.6, 0.86),
             SfxCue(ROOT_DIR / "assets" / "audio" / "一拳击中.wav", 5.3, 0.95),
         ),
     ),
     SceneSpec(
         scene_id="20",
-        title="血书昭世",
+        title="关楼昭令",
         actors=(
-            ActorSpec("xie", "谢长风", "farmer-old", "zh-CN-YunjianNeural", "放松站立", "relieved", -200, 0.82),
-            ActorSpec("su", "苏清遥", "npc-girl", "zh-CN-XiaoxiaoNeural", "站立", "smile", 20, 0.88),
-            ActorSpec("lin", "林沧州", "general-guard", "zh-CN-YunxiNeural", "站立", "neutral", 250, 0.98),
+            ActorSpec("feng", "封守毅", "general-guard", "zh-CN-YunxiNeural", "放松站立", "relieved", -200, 0.92),
+            ActorSpec("ning", "宁听雪", "face-13", "zh-CN-XiaoxiaoNeural", "站立", "smile", 20, 0.88),
+            ActorSpec("lu", "陆青川", "face-2", "zh-CN-YunxiNeural", "站立", "neutral", 250, 0.96),
         ),
         lines=(
-            LineSpec("xie", "血书、军粮册、官印残蜡都在这里。陈堂主与铁无锋谋反的证据俱全。", "relieved"),
-            LineSpec("su", "苍云关众军亲眼所见，这笔旧账，再也压不回黑夜里。", "smile"),
-            LineSpec("lin", "关门既守住了，江湖路还长。等我们回城，再替死者一一讨名。", "neutral"),
+            LineSpec("feng", "断龙令、仓册、机括图与叶藏锋亲笔押印俱在，白鹿关众军听令，今夜就地封仓拿人。", "relieved"),
+            LineSpec("ning", "雪夜里埋了二十年的旧案，总算在天亮前见了人心。", "smile"),
+            LineSpec("lu", "关门守住了，命也守住了。接下来，该把那些躲在城里的名字一个个挖出来。", "neutral"),
         ),
         bgm_path=ROOT_DIR / "assets" / "bgm" / "铁血丹心.mp3",
         background_top=(163, 177, 204),
@@ -545,6 +595,66 @@ def _font(size: int, *, bold: bool = False) -> ImageFont.FreeTypeFont:
     return ImageFont.truetype(str(FONT_BOLD if bold else FONT_REGULAR), size=size)
 
 
+def _render_scale() -> float:
+    return poseviz.render_scale_for_size(WIDTH, HEIGHT)
+
+
+def _ui_scale() -> float:
+    return max(0.66, _render_scale() * 0.92)
+
+
+def _ui_px(value: int) -> int:
+    return max(1, int(round(value * _ui_scale())))
+
+
+def _ui_font_px(value: int) -> int:
+    return max(10, _ui_px(value) - 2)
+
+
+def _actor_layout_scale() -> float:
+    return 0.78 + 0.22 * _render_scale()
+
+
+def _height_relative(value: float) -> float:
+    return value / DEFAULT_HEIGHT * HEIGHT
+
+
+@lru_cache(maxsize=64)
+def _effect_path(effect_name: str) -> Path | None:
+    assets = {
+        "电闪雷鸣": ROOT_DIR / "assets" / "effects" / "电闪雷鸣.gif",
+        "风起云涌": ROOT_DIR / "assets" / "effects" / "风起云涌.gif",
+        "命中特效": ROOT_DIR / "assets" / "effects" / "命中特效.gif",
+        "银河旋转特效": ROOT_DIR / "assets" / "effects" / "银河旋转特效.gif",
+        "熊熊大火": ROOT_DIR / "assets" / "effects" / "熊熊大火.gif",
+        "爆炸特效": ROOT_DIR / "assets" / "effects" / "爆炸特效.webp",
+        "启动大招特效": ROOT_DIR / "assets" / "effects" / "启动大招特效.webp",
+        "夕阳武士": ROOT_DIR / "assets" / "effects" / "夕阳武士.gif",
+    }
+    path = assets.get(effect_name)
+    if path and path.exists():
+        return path
+    return None
+
+
+@lru_cache(maxsize=64)
+def _effect_frames(effect_name: str) -> tuple[Image.Image, ...]:
+    path = _effect_path(effect_name)
+    if path is None:
+        return tuple()
+    with Image.open(path) as image:
+        total = max(1, int(getattr(image, "n_frames", 1)))
+        frames: list[Image.Image] = []
+        for index in range(total):
+            image.seek(index)
+            frame = image.convert("RGBA")
+            if frame.size != (WIDTH, HEIGHT):
+                frames.append(frame.copy())
+            else:
+                frames.append(frame.copy())
+        return tuple(frames)
+
+
 def _wrap_text(text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list[str]:
     lines: list[str] = []
     current = ""
@@ -566,6 +676,11 @@ def _track(track_name: str) -> poseviz.PoseTrack:
     return poseviz._load_track(poseviz.POSE_DIR / f"{track_name}.pose.json", width=WIDTH, height=HEIGHT)
 
 
+@lru_cache(maxsize=64)
+def _has_track(track_name: str) -> bool:
+    return (poseviz.POSE_DIR / f"{track_name}.pose.json").exists()
+
+
 @lru_cache(maxsize=32)
 def _textures(character_id: str) -> poseviz.TexturePack:
     return poseviz._load_texture_pack(character_id)
@@ -573,22 +688,89 @@ def _textures(character_id: str) -> poseviz.TexturePack:
 
 def _all_head_size() -> int:
     values = [_track(actor.track_name).head_size for scene in SCENES for actor in scene.actors]
-    base = int(round(sum(values) / len(values) * 0.88))
-    return max(62, min(80, base))
+    scale = _render_scale()
+    min_head = max(28, int(round(62 * scale)))
+    max_head = max(min_head + 8, int(round(80 * scale)))
+    base = int(round(sum(values) / len(values) * 0.82))
+    return max(min_head, min(max_head, base))
 
 
-async def _synthesize_tts(text: str, voice: str, output_path: Path) -> None:
-    if output_path.exists() and output_path.stat().st_size > 0:
+def _set_render_profile(*, fast: bool = False, fast2: bool = False, fast3: bool = False) -> int:
+    global WIDTH, HEIGHT, GROUND_Y, EFFECT_DENSITY, TMP_DIR, RENDER_PROFILE
+    if fast3:
+        WIDTH = FAST3_WIDTH
+        HEIGHT = FAST3_HEIGHT
+        EFFECT_DENSITY = 0.52
+        TMP_DIR = TMP_ROOT / "fast3"
+        fps = FAST3_FPS
+        RENDER_PROFILE = "fast3"
+    elif fast2:
+        WIDTH = FAST2_WIDTH
+        HEIGHT = FAST2_HEIGHT
+        EFFECT_DENSITY = 0.45
+        TMP_DIR = TMP_ROOT / "fast2"
+        fps = FAST2_FPS
+        RENDER_PROFILE = "fast2"
+    elif fast:
+        WIDTH = FAST_WIDTH
+        HEIGHT = FAST_HEIGHT
+        EFFECT_DENSITY = 0.72
+        TMP_DIR = TMP_ROOT / "fast"
+        fps = FAST_FPS
+        RENDER_PROFILE = "fast"
+    else:
+        WIDTH = DEFAULT_WIDTH
+        HEIGHT = DEFAULT_HEIGHT
+        EFFECT_DENSITY = 1.0
+        TMP_DIR = TMP_ROOT / "normal"
+        fps = DEFAULT_FPS
+        RENDER_PROFILE = "normal"
+    GROUND_Y = HEIGHT * 0.82
+    _track.cache_clear()
+    _effect_frames.cache_clear()
+    return fps
+
+
+def _scaled_effect_count(base: int) -> int:
+    return max(1, int(round(base * EFFECT_DENSITY)))
+
+
+def _default_idle_track(actor: ActorSpec, requested: str) -> str:
+    palette = poseviz.CHARACTER_PALETTES.get(actor.character_id)
+    feminine = actor.character_id in {"npc-girl", "office-worker-modern", "reporter-selfie"} or actor.character_id.startswith("face-") and actor.character_id in {"face-5", "face-7", "face-8", "face-13", "face-14", "face-15", "face-16"}
+    if feminine:
+        if requested == "掐腰站立" and _has_track("女人单手掐腰站立"):
+            return "女人单手掐腰站立"
+        if requested in {"站立", "放松站立"} and _has_track("女人站立"):
+            return "女人站立"
+    if requested == "站立" and _has_track("放松站立"):
+        return "放松站立"
+    return requested
+
+
+async def _synthesize_tts(text: str, voice: str, output_path: Path, *, refresh: bool = False) -> None:
+    if not refresh and output_path.exists() and output_path.stat().st_size > 0:
         return
+    existing_ok = output_path.exists() and output_path.stat().st_size > 0
+    temp_path = output_path.with_suffix(f"{output_path.suffix}.tmp")
     last_error: Exception | None = None
     for attempt in range(3):
         try:
             communicate = edge_tts.Communicate(text=text, voice=voice, rate="+0%")
-            await communicate.save(str(output_path))
+            if temp_path.exists():
+                temp_path.unlink()
+            await communicate.save(str(temp_path))
+            if temp_path.stat().st_size <= 0:
+                raise RuntimeError(f"TTS output is empty: {temp_path}")
+            temp_path.replace(output_path)
             return
         except Exception as exc:
             last_error = exc
+            if temp_path.exists():
+                temp_path.unlink()
             await asyncio.sleep(1.2 * (attempt + 1))
+    if existing_ok:
+        return
     assert last_error is not None
     raise last_error
 
@@ -604,14 +786,14 @@ def _scene_paths(scene: SceneSpec) -> dict[str, Path]:
     }
 
 
-def _build_schedule(scene: SceneSpec, scene_dir: Path) -> tuple[list[ScheduledLine], float]:
+def _build_schedule(scene: SceneSpec, scene_dir: Path, *, refresh_tts: bool = False) -> tuple[list[ScheduledLine], float]:
     actor_map = {actor.actor_id: actor for actor in scene.actors}
     schedule: list[ScheduledLine] = []
     cursor = scene.hold_s
     for index, line in enumerate(scene.lines, start=1):
         actor = actor_map[line.speaker_id]
         tts_path = scene_dir / f"line_{index:02d}.mp3"
-        asyncio.run(_synthesize_tts(line.text, actor.voice, tts_path))
+        asyncio.run(_synthesize_tts(line.text, actor.voice, tts_path, refresh=refresh_tts))
         duration_s = _ffprobe_duration(tts_path)
         schedule.append(
             ScheduledLine(
@@ -680,86 +862,119 @@ def _gradient_background(image: Image.Image, top: tuple[int, int, int], bottom: 
         draw.line((0, y, image.width, y), fill=color, width=1)
 
 
-def _draw_effect(draw: ImageDraw.ImageDraw, scene: SceneSpec, progress: float) -> None:
-    accent = scene.accent
-    if scene.effect == "rain":
-        for index in range(16):
-            x = (index * 73 + int(progress * 340)) % (WIDTH + 140) - 70
-            y = (index * 37 + int(progress * 220)) % HEIGHT
-            draw.line((x, y, x - 18, y + 38), fill=(*accent, 90), width=2)
-    elif scene.effect == "wind":
-        for index in range(4):
-            y = 118 + index * 74 + math.sin(progress * 6.0 + index) * 10.0
-            draw.arc((64, y - 18, WIDTH - 64, y + 22), 8, 170, fill=(*accent, 110), width=3)
-    elif scene.effect == "impact":
-        radius = 40 + progress * 130
-        cx = WIDTH * 0.56
-        cy = HEIGHT * 0.58
-        draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius), outline=(*accent, 88), width=4)
-    elif scene.effect == "slash":
-        x0 = WIDTH * (0.2 + progress * 0.34)
-        draw.line((x0, HEIGHT * 0.18, x0 + 180, HEIGHT * 0.8), fill=(*accent, 155), width=10)
-        draw.line((x0 + 16, HEIGHT * 0.23, x0 + 168, HEIGHT * 0.76), fill=(255, 247, 236, 175), width=4)
-    elif scene.effect == "thunder":
-        if 0.2 < progress < 0.3:
-            draw.rectangle((0, 0, WIDTH, HEIGHT), fill=(235, 242, 255, 90))
-        bolt = [(WIDTH * 0.68, 0), (WIDTH * 0.62, 118), (WIDTH * 0.69, 118), (WIDTH * 0.57, 250), (WIDTH * 0.66, 250), (WIDTH * 0.55, 420)]
-        draw.line(bolt, fill=(*accent, 180), width=6)
-    elif scene.effect == "fire":
-        for index in range(9):
-            x = 90 + index * 92 + math.sin(progress * 7.0 + index) * 16.0
-            flame_h = 80 + (index % 3) * 24
-            draw.polygon([(x, HEIGHT), (x - 20, HEIGHT - flame_h * 0.4), (x, HEIGHT - flame_h), (x + 20, HEIGHT - flame_h * 0.4)], fill=(255, 140, 42, 92))
-    elif scene.effect == "burst":
-        cx = WIDTH * 0.56
-        cy = HEIGHT * 0.54
-        for index in range(8):
-            angle = progress * math.tau + index * (math.tau / 8.0)
-            x1 = cx + math.cos(angle) * 40
-            y1 = cy + math.sin(angle) * 40
-            x2 = cx + math.cos(angle) * 110
-            y2 = cy + math.sin(angle) * 110
-            draw.line((x1, y1, x2, y2), fill=(*accent, 138), width=5)
-    elif scene.effect == "embers":
-        for index in range(18):
-            x = (index * 53 + int(progress * 250)) % WIDTH
-            y = HEIGHT - ((index * 33 + int(progress * 310)) % HEIGHT)
-            r = 3 + (index % 3)
-            draw.ellipse((x - r, y - r, x + r, y + r), fill=(*accent, 122))
-    elif scene.effect == "dust":
-        for index in range(12):
-            x = (index * 81 + int(progress * 180)) % WIDTH
-            y = HEIGHT * 0.78 + math.sin(progress * 4.0 + index) * 12.0
-            draw.ellipse((x - 18, y - 8, x + 18, y + 8), fill=(*accent, 46))
+def _effect_trigger_times(scene: SceneSpec, duration_s: float) -> tuple[float, ...]:
+    hints = EFFECT_AUDIO_HINTS.get(scene.effect, ())
+    starts: list[float] = []
+    if hints:
+        for cue in scene.sfx:
+            cue_name = cue.path.stem
+            if any(hint in cue_name for hint in hints):
+                starts.append(max(0.0, min(duration_s, cue.offset_s)))
+    if not starts and scene.sfx:
+        starts = [max(0.0, min(duration_s, cue.offset_s)) for cue in scene.sfx]
+    if not starts:
+        starts = [max(0.0, duration_s * 0.35)]
+    deduped: list[float] = []
+    for start_s in sorted(starts):
+        if not deduped or abs(start_s - deduped[-1]) > 0.08:
+            deduped.append(start_s)
+    return tuple(deduped)
+
+
+def _draw_effect(image: Image.Image, draw: ImageDraw.ImageDraw, scene: SceneSpec, t_s: float, duration_s: float) -> None:
+    if EFFECT_DENSITY <= 0.0:
+        return
+    effect_spec = EFFECT_ASSET_MAP.get(scene.effect)
+    if effect_spec is None:
+        return
+    effect_name, box_ratio, alpha = effect_spec
+    frames = _effect_frames(effect_name)
+    if not frames:
+        return
+    effect_duration = EFFECT_ONE_SHOT_DURATION_S.get(scene.effect, 1.4)
+    active_start_s: float | None = None
+    for start_s in _effect_trigger_times(scene, duration_s):
+        end_s = min(duration_s, start_s + effect_duration)
+        if start_s <= t_s <= end_s:
+            active_start_s = start_s
+            active_end_s = max(start_s + 0.001, end_s)
+            break
+    if active_start_s is None:
+        return
+    local_progress = (t_s - active_start_s) / max(0.001, active_end_s - active_start_s)
+    effect_progress = max(0.0, min(1.0, local_progress * EFFECT_PLAYBACK_RATE))
+    frame_index = min(len(frames) - 1, int(effect_progress * len(frames)))
+    frame = frames[frame_index].copy()
+    target_alpha = int(round(EFFECT_ALPHA_MIN + (EFFECT_ALPHA_MAX - EFFECT_ALPHA_MIN) * max(0.0, min(1.0, alpha))))
+    channel = frame.getchannel("A").point(
+        lambda value: 0 if value <= 0 else max(EFFECT_ALPHA_MIN, min(EFFECT_ALPHA_MAX, int(round(value * target_alpha / 255.0))))
+    )
+    frame.putalpha(channel)
+    x = int(round(box_ratio[0] * WIDTH))
+    y = int(round(box_ratio[1] * HEIGHT))
+    w = max(4, int(round(box_ratio[2] * WIDTH)))
+    h = max(4, int(round(box_ratio[3] * HEIGHT)))
+    frame = frame.resize((w, h), Image.Resampling.LANCZOS)
+    image.alpha_composite(frame, (x, y))
 
 
 def _draw_caption(draw: ImageDraw.ImageDraw, scene: SceneSpec, progress: float) -> None:
-    title_font = _font(26, bold=True)
-    scene_font = _font(22, bold=True)
-    draw.rounded_rectangle((28, 24, 470, 126), radius=20, fill=(14, 18, 28, 208))
-    draw.text((48, 42), TITLE, fill=(248, 244, 235), font=title_font)
-    draw.text((48, 78), f"{scene.scene_id}  {scene.title}", fill=scene.accent, font=scene_font)
-    bar_w = int(320 * min(1.0, max(0.0, progress)))
-    draw.rounded_rectangle((48, 110, 368, 118), radius=4, fill=(82, 88, 106))
-    draw.rounded_rectangle((48, 110, 48 + bar_w, 118), radius=4, fill=scene.accent)
+    title_font = _font(_ui_font_px(26), bold=True)
+    scene_font = _font(_ui_font_px(22), bold=True)
+    x0 = _ui_px(28)
+    y0 = _ui_px(24)
+    x1 = _ui_px(470)
+    y1 = _ui_px(126)
+    draw.rounded_rectangle((x0, y0, x1, y1), radius=_ui_px(20), fill=(14, 18, 28, 208))
+    draw.text((_ui_px(48), _ui_px(42)), TITLE, fill=(248, 244, 235), font=title_font)
+    draw.text((_ui_px(48), _ui_px(78)), f"{scene.scene_id}  {scene.title}", fill=scene.accent, font=scene_font)
+    if RENDER_PROFILE == "fast3":
+        return
+    bar_x = _ui_px(48)
+    bar_y0 = _ui_px(110)
+    bar_y1 = _ui_px(118)
+    bar_max = _ui_px(320)
+    bar_w = int(bar_max * min(1.0, max(0.0, progress)))
+    draw.rounded_rectangle((bar_x, bar_y0, bar_x + bar_max, bar_y1), radius=_ui_px(4), fill=(82, 88, 106))
+    draw.rounded_rectangle((bar_x, bar_y0, bar_x + bar_w, bar_y1), radius=_ui_px(4), fill=scene.accent)
 
 
 def _draw_subtitle(draw: ImageDraw.ImageDraw, label: str, text: str) -> None:
-    name_font = _font(24, bold=True)
-    text_font = _font(26, bold=False)
-    lines = _wrap_text(f"{label}：{text}", text_font, WIDTH - 140)
-    plate_h = 82 + max(0, len(lines) - 1) * 30
-    y0 = HEIGHT - plate_h - 28
-    draw.rounded_rectangle((38, y0, WIDTH - 38, HEIGHT - 28), radius=18, fill=(16, 18, 24, 220))
-    draw.text((60, y0 + 18), label, fill=(255, 226, 172), font=name_font)
-    text_y = y0 + 18
+    name_font = _font(_ui_font_px(24), bold=True)
+    text_font = _font(_ui_font_px(26), bold=False)
+    subtitle_margin = _ui_px(38)
+    subtitle_bottom = _ui_px(28)
+    plate_radius = _ui_px(18)
+    line_gap = _ui_px(30)
+    label_x = _ui_px(60)
+    text_offset = _ui_px(44)
+    lines = _wrap_text(f"{label}：{text}", text_font, WIDTH - subtitle_margin * 2 - _ui_px(24))
+    plate_h = _ui_px(82) + max(0, len(lines) - 1) * line_gap
+    y0 = HEIGHT - plate_h - subtitle_bottom
+    draw.rounded_rectangle((subtitle_margin, y0, WIDTH - subtitle_margin, HEIGHT - subtitle_bottom), radius=plate_radius, fill=(16, 18, 24, 220))
+    draw.text((label_x, y0 + _ui_px(18)), label, fill=(255, 226, 172), font=name_font)
+    text_y = y0 + _ui_px(18)
     for idx, line in enumerate(lines):
-        x = 60 if idx == 0 else 60
         prefix = f"{label}：" if idx == 0 else ""
         content = line[len(prefix) :] if idx == 0 and line.startswith(prefix) else line
-        offset_x = 44 if idx == 0 else 0
-        draw.text((60 + offset_x, text_y), content, fill=(247, 244, 238), font=text_font)
-        text_y += 30
+        offset_x = text_offset if idx == 0 else 0
+        draw.text((label_x + offset_x, text_y), content, fill=(247, 244, 238), font=text_font)
+        text_y += line_gap
+
+
+def _render_scene_base(scene: SceneSpec) -> Image.Image:
+    image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 255))
+    _gradient_background(image, scene.background_top, scene.background_bottom)
+    draw = ImageDraw.Draw(image, "RGBA")
+    _draw_caption(draw, scene, 1.0 if RENDER_PROFILE == "fast3" else 0.0)
+    return image
+
+
+def _render_subtitle_overlay(label: str, text: str) -> Image.Image:
+    overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay, "RGBA")
+    _draw_subtitle(draw, label, text)
+    return overlay
 
 
 def _active_line(schedule: list[ScheduledLine], t_s: float) -> ScheduledLine | None:
@@ -776,25 +991,34 @@ def _actor_stage_points(
 ) -> dict[str, tuple[float, float]]:
     base = {name: poseviz._stage_point(track, point, width=WIDTH, height=HEIGHT) for name, point in points.items()}
     stage: dict[str, tuple[float, float]] = {}
-    anchor_x = WIDTH * 0.5 + actor.x_offset
+    layout_scale = _actor_layout_scale()
+    actor_scale = actor.scale * layout_scale
+    actor_offset = _height_relative(actor.x_offset) * layout_scale
+    anchor_x = WIDTH * 0.5 + actor_offset
     for name, (x, y) in base.items():
-        stage_x = WIDTH * 0.5 + (x - WIDTH * 0.5) * actor.scale + actor.x_offset
+        stage_x = WIDTH * 0.5 + (x - WIDTH * 0.5) * actor_scale + actor_offset
         if actor.mirror:
             stage_x = anchor_x - (stage_x - anchor_x)
-        stage_y = GROUND_Y + (y - GROUND_Y) * actor.scale
+        stage_y = GROUND_Y + (y - GROUND_Y) * actor_scale
         stage[name] = (stage_x, stage_y)
     return stage
 
 
-def _draw_actor(
-    image: Image.Image,
+def _render_actor_overlay(
     actor: ActorSpec,
     active: ScheduledLine | None,
     t_s: float,
     head_size: int,
-) -> None:
+    fps: int,
+) -> Image.Image:
+    image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    draw_scale = _render_scale()
+    layout_scale = _actor_layout_scale()
+    limb_width = max(8, int(round(poseviz.LIMB_WIDTH * draw_scale)))
+    joint_radius = max(4, int(round(poseviz.JOINT_RADIUS * draw_scale)))
     speaking = active is not None and active.speaker_id == actor.actor_id
-    track_name = active.track_name if speaking and active.track_name else actor.track_name
+    requested_track = active.track_name if speaking and active.track_name else actor.track_name
+    track_name = requested_track if speaking else _default_idle_track(actor, requested_track)
     track = _track(track_name)
     if not speaking:
         sample_t = 0.0
@@ -812,11 +1036,11 @@ def _draw_actor(
     for start, end in poseviz.POSE_EDGES:
         if start not in LEG_POINTS or start not in stage_points or end not in stage_points:
             continue
-        draw.line((*stage_points[start], *stage_points[end]), fill=poseviz._edge_color(start, palette), width=poseviz.LIMB_WIDTH, joint="curve")
+        draw.line((*stage_points[start], *stage_points[end]), fill=poseviz._edge_color(start, palette), width=limb_width, joint="curve")
     for name, (x, y) in stage_points.items():
         if name in {"nose", "left_hip", "right_hip"} or name not in LEG_POINTS:
             continue
-        radius = poseviz.JOINT_RADIUS
+        radius = joint_radius
         color = poseviz._joint_color(name, palette)
         draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
     poseviz._draw_torso(draw, stage_points, palette)
@@ -825,56 +1049,120 @@ def _draw_actor(
     for start, end in poseviz.POSE_EDGES:
         if start not in ARM_POINTS or start not in stage_points or end not in stage_points:
             continue
-        draw.line((*stage_points[start], *stage_points[end]), fill=poseviz._edge_color(start, palette), width=poseviz.LIMB_WIDTH, joint="curve")
+        draw.line((*stage_points[start], *stage_points[end]), fill=poseviz._edge_color(start, palette), width=limb_width, joint="curve")
     for name, (x, y) in stage_points.items():
         if name in {"nose", "left_hip", "right_hip"} or name not in ARM_POINTS:
             continue
-        radius = poseviz.JOINT_RADIUS
+        radius = joint_radius
         color = poseviz._joint_color(name, palette)
         draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
-    mouth_open = speaking and (int(t_s * FPS) % TALK_MOUTH_CYCLE_FRAMES) < (TALK_MOUTH_CYCLE_FRAMES // 2)
+    mouth_open = speaking and (int(t_s * fps) % TALK_MOUTH_CYCLE_FRAMES) < (TALK_MOUTH_CYCLE_FRAMES // 2)
     expression = active.expression if speaking else actor.expression
     face_texture = poseviz._load_face_texture(actor.character_id, expression=expression, talking=speaking, mouth_open=mouth_open)
-    poseviz._draw_panda_head(image, draw, stage_points, size=int(head_size * actor.scale), textures=textures, face_texture=face_texture)
+    head_draw_size = int(head_size * actor.scale * layout_scale)
+    poseviz._draw_panda_head(image, draw, stage_points, size=head_draw_size, textures=textures, face_texture=face_texture)
     head_center = poseviz._head_center(stage_points)
     if head_center is not None:
-        label_font = _font(20, bold=True)
+        label_font = _font(_ui_font_px(20), bold=True)
         bubble_color = (255, 230, 172, 220) if speaking else (18, 22, 32, 188)
         text_color = (78, 42, 20) if speaking else (240, 240, 240)
         text_w = label_font.getbbox(actor.label)[2] - label_font.getbbox(actor.label)[0]
-        cx, cy = head_center
-        box = (cx - text_w * 0.55 - 18, cy - head_size * actor.scale * 1.18, cx + text_w * 0.55 + 18, cy - head_size * actor.scale * 0.86)
-        draw.rounded_rectangle(box, radius=12, fill=bubble_color)
-        draw.text((box[0] + 16, box[1] + 6), actor.label, fill=text_color, font=label_font)
+        cx, _ = head_center
+        bubble_w = text_w + _ui_px(36)
+        bubble_h = _ui_px(34)
+        foot_y = max(point[1] for point in stage_points.values())
+        box_x0 = cx - bubble_w * 0.5
+        box_y0 = foot_y + _ui_px(10)
+        box_x0 = max(_ui_px(12), min(WIDTH - bubble_w - _ui_px(12), box_x0))
+        box_y0 = max(_ui_px(12), min(HEIGHT - bubble_h - _ui_px(12), box_y0))
+        box = (
+            box_x0,
+            box_y0,
+            box_x0 + bubble_w,
+            box_y0 + bubble_h,
+        )
+        draw.rounded_rectangle(box, radius=_ui_px(12), fill=bubble_color)
+        draw.text((box[0] + _ui_px(16), box[1] + _ui_px(6)), actor.label, fill=text_color, font=label_font)
+    return image
 
 
-def _render_scene_frame(scene: SceneSpec, schedule: list[ScheduledLine], duration_s: float, t_s: float, head_size: int) -> Image.Image:
+def _draw_actor(
+    image: Image.Image,
+    actor: ActorSpec,
+    active: ScheduledLine | None,
+    t_s: float,
+    head_size: int,
+    fps: int,
+) -> None:
+    image.alpha_composite(_render_actor_overlay(actor, active, t_s, head_size, fps))
+
+
+def _render_scene_frame(scene: SceneSpec, schedule: list[ScheduledLine], duration_s: float, t_s: float, head_size: int, fps: int) -> Image.Image:
     image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 255))
     _gradient_background(image, scene.background_top, scene.background_bottom)
-    draw = ImageDraw.Draw(image, "RGBA")
     progress = 0.0 if duration_s <= 1e-6 else max(0.0, min(1.0, t_s / duration_s))
-    _draw_effect(draw, scene, progress)
     active = _active_line(schedule, t_s)
     for actor in scene.actors:
         if not actor.visible:
             continue
-        _draw_actor(image, actor, active, t_s, head_size)
+        _draw_actor(image, actor, active, t_s, head_size, fps)
     draw = ImageDraw.Draw(image, "RGBA")
     _draw_caption(draw, scene, progress)
     if active is not None:
         _draw_subtitle(draw, active.speaker_label, active.text)
+    draw = ImageDraw.Draw(image, "RGBA")
+    _draw_effect(image, draw, scene, t_s, duration_s)
     return image.convert("RGB")
 
 
-def _render_scene_video(scene: SceneSpec, schedule: list[ScheduledLine], duration_s: float, head_size: int, output_path: Path) -> None:
-    proc = poseviz._open_ffmpeg_stream(FPS, WIDTH, HEIGHT, output_path)
+def _render_scene_video(
+    scene: SceneSpec,
+    schedule: list[ScheduledLine],
+    duration_s: float,
+    head_size: int,
+    output_path: Path,
+    fps: int,
+    *,
+    fast: bool,
+    fast2: bool,
+    fast3: bool,
+) -> None:
+    preset, crf = poseviz._encoding_profile(fast=fast, fast2=fast2, fast3=fast3)
+    proc = poseviz._open_ffmpeg_stream(fps, WIDTH, HEIGHT, output_path, preset=preset, crf=crf)
     try:
         assert proc.stdin is not None
-        total_frames = max(1, int(round(duration_s * FPS)))
+        total_frames = max(1, int(round(duration_s * fps)))
+        base_frame = _render_scene_base(scene) if fast3 else None
+        static_actors = {
+            actor.actor_id: _render_actor_overlay(actor, None, 0.0, head_size, fps)
+            for actor in scene.actors
+            if actor.visible
+        } if fast3 else {}
+        subtitle_overlays = {
+            (item.speaker_label, item.text): _render_subtitle_overlay(item.speaker_label, item.text)
+            for item in schedule
+        } if fast3 else {}
         for frame_index in range(total_frames):
-            t_s = frame_index / FPS
-            frame = _render_scene_frame(scene, schedule, duration_s, t_s, head_size)
-            proc.stdin.write(frame.tobytes())
+            t_s = frame_index / fps
+            if fast3:
+                frame = base_frame.copy()
+                progress = 0.0 if duration_s <= 1e-6 else max(0.0, min(1.0, t_s / duration_s))
+                active = _active_line(schedule, t_s)
+                for actor in scene.actors:
+                    if not actor.visible:
+                        continue
+                    if active is not None and active.speaker_id == actor.actor_id:
+                        frame.alpha_composite(_render_actor_overlay(actor, active, t_s, head_size, fps))
+                    else:
+                        frame.alpha_composite(static_actors[actor.actor_id])
+                if active is not None:
+                    frame.alpha_composite(subtitle_overlays[(active.speaker_label, active.text)])
+                draw = ImageDraw.Draw(frame, "RGBA")
+                _draw_effect(frame, draw, scene, t_s, duration_s)
+                proc.stdin.write(frame.convert("RGB").tobytes())
+            else:
+                frame = _render_scene_frame(scene, schedule, duration_s, t_s, head_size, fps)
+                proc.stdin.write(frame.tobytes())
     finally:
         if proc.stdin is not None:
             proc.stdin.close()
@@ -931,7 +1219,8 @@ def _concat_scenes(scene_files: list[Path], output_path: Path) -> None:
         concat_list.unlink(missing_ok=True)
 
 
-def render_story(output_path: Path, *, force: bool = False) -> None:
+def render_story(output_path: Path, *, force: bool = False, fast: bool = False, fast2: bool = False, fast3: bool = False) -> None:
+    fps = _set_render_profile(fast=fast, fast2=fast2, fast3=fast3)
     TMP_DIR.mkdir(parents=True, exist_ok=True)
     head_size = _all_head_size()
     scene_outputs: list[Path] = []
@@ -941,9 +1230,9 @@ def render_story(output_path: Path, *, force: bool = False) -> None:
             scene_outputs.append(paths["scene_mp4"])
             print(paths["scene_mp4"])
             continue
-        schedule, duration_s = _build_schedule(scene, paths["dir"])
+        schedule, duration_s = _build_schedule(scene, paths["dir"], refresh_tts=force)
         _mix_scene_audio(scene, schedule, duration_s, paths["audio"])
-        _render_scene_video(scene, schedule, duration_s, head_size, paths["video"])
+        _render_scene_video(scene, schedule, duration_s, head_size, paths["video"], fps, fast=fast, fast2=fast2, fast3=fast3)
         _mux_scene(paths["video"], paths["audio"], paths["scene_mp4"])
         scene_outputs.append(paths["scene_mp4"])
         print(paths["scene_mp4"])
@@ -955,8 +1244,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Render a multi-character Water Margin dialogue story using DNN pose stickman actors with Chinese subtitles, TTS, BGM, SFX, and action blocking.")
     parser.add_argument("--output", type=Path, default=OUTPUT_DEFAULT)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--fast", action="store_true")
+    parser.add_argument("--fast2", action="store_true")
+    parser.add_argument("--fast3", action="store_true")
     args = parser.parse_args()
-    render_story(args.output.resolve(), force=args.force)
+    render_story(args.output.resolve(), force=args.force, fast=args.fast, fast2=args.fast2, fast3=args.fast3)
     return 0
 
 

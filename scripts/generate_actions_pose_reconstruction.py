@@ -20,6 +20,16 @@ CHARACTER_DIR = ROOT_DIR / "assets" / "characters"
 PANDA_PACK_DIR = CHARACTER_DIR / "_shared_skins" / "panda_head_pack"
 DEFAULT_FACE_TEXTURE_PATH = CHARACTER_DIR / "face-1" / "skins" / "face_default.png"
 DEFAULT_OUTFIT_TEXTURE_PATH = CHARACTER_DIR / "narrator" / "skins" / "outfit.png"
+DEFAULT_WIDTH = 960
+DEFAULT_HEIGHT = 540
+DEFAULT_FPS = 24
+FAST_FPS = 12
+FAST2_WIDTH = 640
+FAST2_HEIGHT = 360
+FAST2_FPS = 8
+FAST3_WIDTH = 480
+FAST3_HEIGHT = 270
+FAST3_FPS = 6
 
 POSE_NAMES = [
     "nose",
@@ -58,6 +68,10 @@ EYE_PATCH_FILL = (36, 36, 36, 255)
 NOSE_FILL = (83, 61, 55, 255)
 LIMB_WIDTH = 24
 JOINT_RADIUS = 12
+
+
+def render_scale_for_size(width: int, height: int) -> float:
+    return min(width / DEFAULT_WIDTH, height / DEFAULT_HEIGHT)
 
 
 @dataclass(frozen=True)
@@ -138,7 +152,32 @@ def _crop_visible_region(image: Image.Image) -> Image.Image:
     bbox = alpha.getbbox()
     if bbox is None:
         return image
-    return image.crop(bbox)
+    left, top, right, bottom = bbox
+    width = right - left
+    height = bottom - top
+    side = int(round(max(width, height) * 1.32))
+    cx = (left + right) * 0.5
+    cy = (top + bottom) * 0.5
+    x0 = int(round(cx - side * 0.5))
+    y0 = int(round(cy - side * 0.5))
+    x1 = x0 + side
+    y1 = y0 + side
+
+    if x0 < 0:
+        x1 -= x0
+        x0 = 0
+    if y0 < 0:
+        y1 -= y0
+        y0 = 0
+    if x1 > image.width:
+        shift = x1 - image.width
+        x0 = max(0, x0 - shift)
+        x1 = image.width
+    if y1 > image.height:
+        shift = y1 - image.height
+        y0 = max(0, y0 - shift)
+        y1 = image.height
+    return image.crop((x0, y0, x1, y1))
 
 
 def _mix_rgb(a: tuple[int, int, int], b: tuple[int, int, int], ratio: float) -> tuple[int, int, int]:
@@ -286,7 +325,25 @@ def _load_texture_pack(
 TEXTURES = _load_texture_pack()
 
 
-def _open_ffmpeg_stream(fps: int, width: int, height: int, output_path: Path) -> subprocess.Popen[bytes]:
+def _encoding_profile(*, fast: bool = False, fast2: bool = False, fast3: bool = False) -> tuple[str, int]:
+    if fast3:
+        return ("ultrafast", 32)
+    if fast2:
+        return ("ultrafast", 30)
+    if fast:
+        return ("ultrafast", 26)
+    return ("medium", 18)
+
+
+def _open_ffmpeg_stream(
+    fps: int,
+    width: int,
+    height: int,
+    output_path: Path,
+    *,
+    preset: str = "medium",
+    crf: int = 18,
+) -> subprocess.Popen[bytes]:
     ffmpeg = shutil.which("ffmpeg")
     if not ffmpeg:
         raise RuntimeError("ffmpeg is required")
@@ -309,9 +366,9 @@ def _open_ffmpeg_stream(fps: int, width: int, height: int, output_path: Path) ->
         "-pix_fmt",
         "yuv420p",
         "-preset",
-        "medium",
+        preset,
         "-crf",
-        "18",
+        str(crf),
         str(output_path),
     ]
     return subprocess.Popen(command, stdin=subprocess.PIPE)
@@ -356,6 +413,7 @@ def _load_track(path: Path, *, width: int, height: int) -> PoseTrack:
         if "left_shoulder" in keypoints and "right_shoulder" in keypoints:
             head_sizes.append(abs(float(keypoints["right_shoulder"][0]) - float(keypoints["left_shoulder"][0])) * scale * 0.62)
     stable_head_size = int(round(float(np.median(head_sizes)))) if head_sizes else 42
+    min_head_size = max(28, int(round(height * 0.075)))
     return PoseTrack(
         name=path.stem.replace(".pose", ""),
         source_path=str(payload.get("source_path") or ""),
@@ -365,7 +423,7 @@ def _load_track(path: Path, *, width: int, height: int) -> PoseTrack:
         x_center=(x_min + x_max) * 0.5,
         y_bottom=y_max,
         scale=scale,
-        head_size=max(62, int(round(stable_head_size * 1.68))),
+        head_size=max(min_head_size, int(round(stable_head_size * 1.68))),
     )
 def _interpolate_point(a: np.ndarray | None, b: np.ndarray | None, alpha: float) -> np.ndarray | None:
     if a is None and b is None:
@@ -439,25 +497,63 @@ def _draw_label(draw: ImageDraw.ImageDraw, track: PoseTrack, width: int) -> None
     draw.text((width - 222, 24), "YOLOv8 Pose JSON", fill=(180, 190, 210))
 
 
-def _head_center(points: dict[str, tuple[float, float]]) -> tuple[float, float] | None:
+def _head_center(points: dict[str, tuple[float, float]], size: int | None = None) -> tuple[float, float] | None:
     head_markers = [points[key] for key in ("left_eye", "right_eye", "left_ear", "right_ear") if key in points]
-    if len(head_markers) >= 3:
-        marker_span_y = max(point[1] for point in head_markers) - min(point[1] for point in head_markers)
-        return (
+    marker_center: tuple[float, float] | None = None
+    if len(head_markers) >= 2:
+        marker_center = (
             sum(point[0] for point in head_markers) / len(head_markers),
-            sum(point[1] for point in head_markers) / len(head_markers) - max(16.0, marker_span_y * 0.55),
+            sum(point[1] for point in head_markers) / len(head_markers),
         )
-    if "nose" in points:
-        return points["nose"]
-    ears = [points[key] for key in ("left_ear", "right_ear") if key in points]
-    if ears:
-        return (sum(point[0] for point in ears) / len(ears), sum(point[1] for point in ears) / len(ears))
+    elif "nose" in points:
+        marker_center = points["nose"]
+    else:
+        ears = [points[key] for key in ("left_ear", "right_ear") if key in points]
+        if ears:
+            marker_center = (
+                sum(point[0] for point in ears) / len(ears),
+                sum(point[1] for point in ears) / len(ears),
+            )
+
     shoulders = [points[key] for key in ("left_shoulder", "right_shoulder") if key in points]
     if shoulders:
-        cx = sum(point[0] for point in shoulders) / len(shoulders)
-        cy = min(point[1] for point in shoulders) - 28
-        return (cx, cy)
-    return None
+        shoulder_center = (
+            sum(point[0] for point in shoulders) / len(shoulders),
+            sum(point[1] for point in shoulders) / len(shoulders),
+        )
+        hip_points = [points[key] for key in ("left_hip", "right_hip") if key in points]
+        if hip_points:
+            hip_center = (
+                sum(point[0] for point in hip_points) / len(hip_points),
+                sum(point[1] for point in hip_points) / len(hip_points),
+            )
+            up_x = shoulder_center[0] - hip_center[0]
+            up_y = shoulder_center[1] - hip_center[1]
+        else:
+            up_x = 0.0
+            up_y = -1.0
+        up_len = max(1.0, float(np.hypot(up_x, up_y)))
+        up_unit = (up_x / up_len, up_y / up_len)
+        # Keep the head visually attached above the shoulder line instead of
+        # letting the chin collapse onto the chest in relaxed standing poses.
+        head_offset = max(26.0, float(size or 42) * 1.02)
+        anchor = (
+            shoulder_center[0] + up_unit[0] * head_offset,
+            shoulder_center[1] + up_unit[1] * head_offset,
+        )
+        if marker_center is None:
+            return anchor
+        dx = marker_center[0] - anchor[0]
+        dy = marker_center[1] - anchor[1]
+        size_value = float(size or 42)
+        max_dx = max(8.0, size_value * 0.18)
+        max_up = max(8.0, size_value * 0.16)
+        max_down = max(4.0, size_value * 0.06)
+        dx = max(-max_dx, min(max_dx, dx))
+        dy = max(-max_up, min(max_down, dy))
+        return (anchor[0] + dx, anchor[1] + dy)
+
+    return marker_center
 
 
 def _paste_texture(canvas: Image.Image, texture: Image.Image, box: tuple[int, int, int, int], mask: Image.Image | None = None) -> None:
@@ -559,6 +655,8 @@ def _draw_torso_texture(image: Image.Image, stage_points: dict[str, tuple[float,
     y0 = max(0, int(np.floor(min(ys) - pad)))
     x1 = min(image.width, int(np.ceil(max(xs) + pad)))
     y1 = min(image.height, int(np.ceil(max(ys) + pad)))
+    if x1 <= x0 or y1 <= y0:
+        return
     mask = Image.new("L", (x1 - x0, y1 - y0), 0)
     mask_draw = ImageDraw.Draw(mask)
     shifted = [(x - x0, y - y0) for x, y in polygon]
@@ -589,12 +687,12 @@ def _draw_panda_head(
     textures: TexturePack = TEXTURES,
     face_texture: Image.Image | None = None,
 ) -> None:
-    center = _head_center(stage_points)
+    center = _head_center(stage_points, size=size)
     if center is None:
         return
     cx, cy = center
-    rx = size * 0.86
-    ry = size * 0.84
+    rx = size * 0.98
+    ry = size * 0.80
     ear_r = size * 0.34
     ear_y = cy - ry * 0.98
     left_ear_x = cx - rx * 0.64
@@ -612,20 +710,13 @@ def _draw_panda_head(
     y0 = max(0, int(round(cy - ry)))
     x1 = min(image.width, int(round(cx + rx)))
     y1 = min(image.height, int(round(cy + ry)))
+    if x1 <= x0 or y1 <= y0:
+        return
     mask = Image.new("L", (x1 - x0, y1 - y0), 0)
     mask_draw = ImageDraw.Draw(mask)
     mask_draw.ellipse((0, 0, x1 - x0, y1 - y0), fill=255)
     draw.ellipse((cx - rx, cy - ry, cx + rx, cy + ry), fill=HEAD_FILL)
-    face_pad_x = max(8, int(round((x1 - x0) * 0.13)))
-    face_pad_y = max(6, int(round((y1 - y0) * 0.16)))
-    fx0 = min(x1 - 1, x0 + face_pad_x)
-    fy0 = min(y1 - 1, y0 + face_pad_y)
-    fx1 = max(fx0 + 1, x1 - face_pad_x)
-    fy1 = max(fy0 + 1, y1 - face_pad_y)
-    face_mask = Image.new("L", (fx1 - fx0, fy1 - fy0), 0)
-    face_mask_draw = ImageDraw.Draw(face_mask)
-    face_mask_draw.ellipse((0, 0, fx1 - fx0, fy1 - fy0), fill=255)
-    _paste_texture(image, face_texture or textures.face, (fx0, fy0, fx1, fy1), mask=face_mask)
+    _paste_texture(image, face_texture or textures.face, (x0, y0, x1, y1), mask=mask)
     draw.ellipse((cx - rx, cy - ry, cx + rx, cy + ry), outline=HEAD_OUTLINE, width=3)
 
 
@@ -671,6 +762,9 @@ def render_video(
     character_id: str | None = None,
     face_texture_path: Path | None = None,
     outfit_texture_path: Path | None = None,
+    fast: bool = False,
+    fast2: bool = False,
+    fast3: bool = False,
 ) -> None:
     tracks = [_load_track(path, width=width, height=height) for path in sorted(POSE_DIR.glob("*.pose.json"))]
     if not tracks:
@@ -680,7 +774,15 @@ def render_video(
         face_texture_path=face_texture_path,
         outfit_texture_path=outfit_texture_path,
     )
-    ffmpeg_proc = _open_ffmpeg_stream(fps, width, height, output_path)
+    preset, crf = _encoding_profile(fast=fast, fast2=fast2, fast3=fast3)
+    ffmpeg_proc = _open_ffmpeg_stream(
+        fps,
+        width,
+        height,
+        output_path,
+        preset=preset,
+        crf=crf,
+    )
     try:
         assert ffmpeg_proc.stdin is not None
         for track in tracks:
@@ -705,23 +807,53 @@ def render_video(
 def main() -> int:
     parser = argparse.ArgumentParser(description="Render a true DNN pose-track skeleton video from assets/actions/.cache/poses/*.pose.json")
     parser.add_argument("--output", type=Path, default=Path("outputs/actions_dnn_pose_pandahead.mp4"))
-    parser.add_argument("--width", type=int, default=960)
-    parser.add_argument("--height", type=int, default=540)
-    parser.add_argument("--fps", type=int, default=24)
+    parser.add_argument("--width", type=int, default=DEFAULT_WIDTH)
+    parser.add_argument("--height", type=int, default=DEFAULT_HEIGHT)
+    parser.add_argument("--fps", type=int, default=DEFAULT_FPS)
     parser.add_argument("--hold", type=float, default=0.6)
     parser.add_argument("--character", default=None)
     parser.add_argument("--face-texture", type=Path, default=None)
     parser.add_argument("--outfit-texture", type=Path, default=None)
+    parser.add_argument("--fast", action="store_true")
+    parser.add_argument("--fast2", action="store_true")
+    parser.add_argument("--fast3", action="store_true")
     args = parser.parse_args()
+    width = args.width
+    height = args.height
+    fps = args.fps
+    hold_s = args.hold
+    if args.fast3:
+        if width == DEFAULT_WIDTH:
+            width = FAST3_WIDTH
+        if height == DEFAULT_HEIGHT:
+            height = FAST3_HEIGHT
+        if fps == DEFAULT_FPS:
+            fps = FAST3_FPS
+        if hold_s == 0.6:
+            hold_s = 0.2
+    elif args.fast2:
+        if width == DEFAULT_WIDTH:
+            width = FAST2_WIDTH
+        if height == DEFAULT_HEIGHT:
+            height = FAST2_HEIGHT
+        if fps == DEFAULT_FPS:
+            fps = FAST2_FPS
+        if hold_s == 0.6:
+            hold_s = 0.3
+    elif args.fast and fps == DEFAULT_FPS:
+        fps = FAST_FPS
     render_video(
         args.output,
-        width=args.width,
-        height=args.height,
-        fps=args.fps,
-        hold_s=args.hold,
+        width=width,
+        height=height,
+        fps=fps,
+        hold_s=hold_s,
         character_id=args.character,
         face_texture_path=args.face_texture,
         outfit_texture_path=args.outfit_texture,
+        fast=args.fast,
+        fast2=args.fast2,
+        fast3=args.fast3,
     )
     print(args.output)
     return 0

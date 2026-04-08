@@ -19,11 +19,23 @@ import generate_actions_pose_reconstruction as poseviz
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-TMP_DIR = ROOT_DIR / "tmp" / "direct_runs" / "wusong_pose_dialogue_story"
+TMP_ROOT = ROOT_DIR / "tmp" / "direct_runs" / "wusong_pose_dialogue_story"
+TMP_DIR = TMP_ROOT / "normal"
 OUTPUT_DEFAULT = ROOT_DIR / "outputs" / "wusong_pose_dialogue_story.mp4"
-FPS = 24
-WIDTH = 960
-HEIGHT = 540
+DEFAULT_FPS = 24
+FAST_FPS = 12
+FAST2_FPS = 8
+FAST3_FPS = 6
+DEFAULT_WIDTH = 960
+DEFAULT_HEIGHT = 540
+FAST_WIDTH = DEFAULT_WIDTH
+FAST_HEIGHT = DEFAULT_HEIGHT
+FAST2_WIDTH = 640
+FAST2_HEIGHT = 360
+FAST3_WIDTH = 480
+FAST3_HEIGHT = 270
+WIDTH = DEFAULT_WIDTH
+HEIGHT = DEFAULT_HEIGHT
 TITLE = "水浒故事·武松对话版"
 GROUND_Y = HEIGHT * 0.82
 TALK_GAP_S = 0.28
@@ -33,6 +45,8 @@ FONT_BOLD = Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc")
 ACTION_TRACKS = {"拳击", "翻跟头gif", "人物A飞踢倒人物B", "舞剑", "跑", "连续后空翻", "降龙十八掌", "鲤鱼打挺"}
 LEG_POINTS = {"left_hip", "right_hip", "left_knee", "right_knee", "left_ankle", "right_ankle"}
 ARM_POINTS = {"left_shoulder", "right_shoulder", "left_elbow", "right_elbow", "left_wrist", "right_wrist"}
+EFFECT_DENSITY = 1.0
+RENDER_PROFILE = "normal"
 
 
 @dataclass(frozen=True)
@@ -360,6 +374,11 @@ def _track(track_name: str) -> poseviz.PoseTrack:
     return poseviz._load_track(poseviz.POSE_DIR / f"{track_name}.pose.json", width=WIDTH, height=HEIGHT)
 
 
+@lru_cache(maxsize=64)
+def _has_track(track_name: str) -> bool:
+    return (poseviz.POSE_DIR / f"{track_name}.pose.json").exists()
+
+
 @lru_cache(maxsize=32)
 def _textures(character_id: str) -> poseviz.TexturePack:
     return poseviz._load_texture_pack(character_id)
@@ -367,8 +386,62 @@ def _textures(character_id: str) -> poseviz.TexturePack:
 
 def _all_head_size() -> int:
     values = [_track(actor.track_name).head_size for scene in SCENES for actor in scene.actors]
+    scale = poseviz.render_scale_for_size(WIDTH, HEIGHT)
+    min_head = max(28, int(round(62 * scale)))
+    max_head = max(min_head + 8, int(round(80 * scale)))
     base = int(round(sum(values) / len(values) * 0.88))
-    return max(62, min(80, base))
+    return max(min_head, min(max_head, base))
+
+
+def _set_render_profile(*, fast: bool = False, fast2: bool = False, fast3: bool = False) -> int:
+    global WIDTH, HEIGHT, GROUND_Y, EFFECT_DENSITY, TMP_DIR, RENDER_PROFILE
+    if fast3:
+        WIDTH = FAST3_WIDTH
+        HEIGHT = FAST3_HEIGHT
+        EFFECT_DENSITY = 0.0
+        TMP_DIR = TMP_ROOT / "fast3"
+        fps = FAST3_FPS
+        RENDER_PROFILE = "fast3"
+    elif fast2:
+        WIDTH = FAST2_WIDTH
+        HEIGHT = FAST2_HEIGHT
+        EFFECT_DENSITY = 0.45
+        TMP_DIR = TMP_ROOT / "fast2"
+        fps = FAST2_FPS
+        RENDER_PROFILE = "fast2"
+    elif fast:
+        WIDTH = FAST_WIDTH
+        HEIGHT = FAST_HEIGHT
+        EFFECT_DENSITY = 0.72
+        TMP_DIR = TMP_ROOT / "fast"
+        fps = FAST_FPS
+        RENDER_PROFILE = "fast"
+    else:
+        WIDTH = DEFAULT_WIDTH
+        HEIGHT = DEFAULT_HEIGHT
+        EFFECT_DENSITY = 1.0
+        TMP_DIR = TMP_ROOT / "normal"
+        fps = DEFAULT_FPS
+        RENDER_PROFILE = "normal"
+    GROUND_Y = HEIGHT * 0.82
+    _track.cache_clear()
+    return fps
+
+
+def _scaled_effect_count(base: int) -> int:
+    return max(1, int(round(base * EFFECT_DENSITY)))
+
+
+def _default_idle_track(actor: ActorSpec, requested: str) -> str:
+    feminine = actor.character_id in {"npc-girl", "office-worker-modern", "reporter-selfie"} or actor.character_id.startswith("face-") and actor.character_id in {"face-5", "face-7", "face-8", "face-13", "face-14", "face-15", "face-16"}
+    if feminine:
+        if requested == "掐腰站立" and _has_track("女人单手掐腰站立"):
+            return "女人单手掐腰站立"
+        if requested in {"站立", "放松站立"} and _has_track("女人站立"):
+            return "女人站立"
+    if requested == "站立" and _has_track("放松站立"):
+        return "放松站立"
+    return requested
 
 
 async def _synthesize_tts(text: str, voice: str, output_path: Path) -> None:
@@ -475,14 +548,16 @@ def _gradient_background(image: Image.Image, top: tuple[int, int, int], bottom: 
 
 
 def _draw_effect(draw: ImageDraw.ImageDraw, scene: SceneSpec, progress: float) -> None:
+    if EFFECT_DENSITY <= 0.0:
+        return
     accent = scene.accent
     if scene.effect == "rain":
-        for index in range(16):
+        for index in range(_scaled_effect_count(16)):
             x = (index * 73 + int(progress * 340)) % (WIDTH + 140) - 70
             y = (index * 37 + int(progress * 220)) % HEIGHT
             draw.line((x, y, x - 18, y + 38), fill=(*accent, 90), width=2)
     elif scene.effect == "wind":
-        for index in range(4):
+        for index in range(_scaled_effect_count(4)):
             y = 118 + index * 74 + math.sin(progress * 6.0 + index) * 10.0
             draw.arc((64, y - 18, WIDTH - 64, y + 22), 8, 170, fill=(*accent, 110), width=3)
     elif scene.effect == "impact":
@@ -500,14 +575,14 @@ def _draw_effect(draw: ImageDraw.ImageDraw, scene: SceneSpec, progress: float) -
         bolt = [(WIDTH * 0.68, 0), (WIDTH * 0.62, 118), (WIDTH * 0.69, 118), (WIDTH * 0.57, 250), (WIDTH * 0.66, 250), (WIDTH * 0.55, 420)]
         draw.line(bolt, fill=(*accent, 180), width=6)
     elif scene.effect == "fire":
-        for index in range(9):
+        for index in range(_scaled_effect_count(9)):
             x = 90 + index * 92 + math.sin(progress * 7.0 + index) * 16.0
             flame_h = 80 + (index % 3) * 24
             draw.polygon([(x, HEIGHT), (x - 20, HEIGHT - flame_h * 0.4), (x, HEIGHT - flame_h), (x + 20, HEIGHT - flame_h * 0.4)], fill=(255, 140, 42, 92))
     elif scene.effect == "burst":
         cx = WIDTH * 0.56
         cy = HEIGHT * 0.54
-        for index in range(8):
+        for index in range(_scaled_effect_count(8)):
             angle = progress * math.tau + index * (math.tau / 8.0)
             x1 = cx + math.cos(angle) * 40
             y1 = cy + math.sin(angle) * 40
@@ -515,13 +590,13 @@ def _draw_effect(draw: ImageDraw.ImageDraw, scene: SceneSpec, progress: float) -
             y2 = cy + math.sin(angle) * 110
             draw.line((x1, y1, x2, y2), fill=(*accent, 138), width=5)
     elif scene.effect == "embers":
-        for index in range(18):
+        for index in range(_scaled_effect_count(18)):
             x = (index * 53 + int(progress * 250)) % WIDTH
             y = HEIGHT - ((index * 33 + int(progress * 310)) % HEIGHT)
             r = 3 + (index % 3)
             draw.ellipse((x - r, y - r, x + r, y + r), fill=(*accent, 122))
     elif scene.effect == "dust":
-        for index in range(12):
+        for index in range(_scaled_effect_count(12)):
             x = (index * 81 + int(progress * 180)) % WIDTH
             y = HEIGHT * 0.78 + math.sin(progress * 4.0 + index) * 12.0
             draw.ellipse((x - 18, y - 8, x + 18, y + 8), fill=(*accent, 46))
@@ -533,6 +608,8 @@ def _draw_caption(draw: ImageDraw.ImageDraw, scene: SceneSpec, progress: float) 
     draw.rounded_rectangle((28, 24, 470, 126), radius=20, fill=(14, 18, 28, 208))
     draw.text((48, 42), TITLE, fill=(248, 244, 235), font=title_font)
     draw.text((48, 78), f"{scene.scene_id}  {scene.title}", fill=scene.accent, font=scene_font)
+    if RENDER_PROFILE == "fast3":
+        return
     bar_w = int(320 * min(1.0, max(0.0, progress)))
     draw.rounded_rectangle((48, 110, 368, 118), radius=4, fill=(82, 88, 106))
     draw.rounded_rectangle((48, 110, 48 + bar_w, 118), radius=4, fill=scene.accent)
@@ -554,6 +631,21 @@ def _draw_subtitle(draw: ImageDraw.ImageDraw, label: str, text: str) -> None:
         offset_x = 44 if idx == 0 else 0
         draw.text((60 + offset_x, text_y), content, fill=(247, 244, 238), font=text_font)
         text_y += 30
+
+
+def _render_scene_base(scene: SceneSpec) -> Image.Image:
+    image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 255))
+    _gradient_background(image, scene.background_top, scene.background_bottom)
+    draw = ImageDraw.Draw(image, "RGBA")
+    _draw_caption(draw, scene, 1.0 if RENDER_PROFILE == "fast3" else 0.0)
+    return image
+
+
+def _render_subtitle_overlay(label: str, text: str) -> Image.Image:
+    overlay = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(overlay, "RGBA")
+    _draw_subtitle(draw, label, text)
+    return overlay
 
 
 def _active_line(schedule: list[ScheduledLine], t_s: float) -> ScheduledLine | None:
@@ -580,15 +672,20 @@ def _actor_stage_points(
     return stage
 
 
-def _draw_actor(
-    image: Image.Image,
+def _render_actor_overlay(
     actor: ActorSpec,
     active: ScheduledLine | None,
     t_s: float,
     head_size: int,
-) -> None:
+    fps: int,
+) -> Image.Image:
+    image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+    draw_scale = poseviz.render_scale_for_size(WIDTH, HEIGHT)
+    limb_width = max(8, int(round(poseviz.LIMB_WIDTH * draw_scale)))
+    joint_radius = max(4, int(round(poseviz.JOINT_RADIUS * draw_scale)))
     speaking = active is not None and active.speaker_id == actor.actor_id
-    track_name = active.track_name if speaking and active.track_name else actor.track_name
+    requested_track = active.track_name if speaking and active.track_name else actor.track_name
+    track_name = requested_track if speaking else _default_idle_track(actor, requested_track)
     track = _track(track_name)
     if not speaking:
         sample_t = 0.0
@@ -606,11 +703,11 @@ def _draw_actor(
     for start, end in poseviz.POSE_EDGES:
         if start not in LEG_POINTS or start not in stage_points or end not in stage_points:
             continue
-        draw.line((*stage_points[start], *stage_points[end]), fill=poseviz._edge_color(start, palette), width=poseviz.LIMB_WIDTH, joint="curve")
+        draw.line((*stage_points[start], *stage_points[end]), fill=poseviz._edge_color(start, palette), width=limb_width, joint="curve")
     for name, (x, y) in stage_points.items():
         if name in {"nose", "left_hip", "right_hip"} or name not in LEG_POINTS:
             continue
-        radius = poseviz.JOINT_RADIUS
+        radius = joint_radius
         color = poseviz._joint_color(name, palette)
         draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
     poseviz._draw_torso(draw, stage_points, palette)
@@ -619,14 +716,14 @@ def _draw_actor(
     for start, end in poseviz.POSE_EDGES:
         if start not in ARM_POINTS or start not in stage_points or end not in stage_points:
             continue
-        draw.line((*stage_points[start], *stage_points[end]), fill=poseviz._edge_color(start, palette), width=poseviz.LIMB_WIDTH, joint="curve")
+        draw.line((*stage_points[start], *stage_points[end]), fill=poseviz._edge_color(start, palette), width=limb_width, joint="curve")
     for name, (x, y) in stage_points.items():
         if name in {"nose", "left_hip", "right_hip"} or name not in ARM_POINTS:
             continue
-        radius = poseviz.JOINT_RADIUS
+        radius = joint_radius
         color = poseviz._joint_color(name, palette)
         draw.ellipse((x - radius, y - radius, x + radius, y + radius), fill=color)
-    mouth_open = speaking and (int(t_s * FPS) % TALK_MOUTH_CYCLE_FRAMES) < (TALK_MOUTH_CYCLE_FRAMES // 2)
+    mouth_open = speaking and (int(t_s * fps) % TALK_MOUTH_CYCLE_FRAMES) < (TALK_MOUTH_CYCLE_FRAMES // 2)
     expression = active.expression if speaking else actor.expression
     face_texture = poseviz._load_face_texture(actor.character_id, expression=expression, talking=speaking, mouth_open=mouth_open)
     poseviz._draw_panda_head(image, draw, stage_points, size=int(head_size * actor.scale), textures=textures, face_texture=face_texture)
@@ -640,9 +737,21 @@ def _draw_actor(
         box = (cx - text_w * 0.55 - 18, cy - head_size * actor.scale * 1.18, cx + text_w * 0.55 + 18, cy - head_size * actor.scale * 0.86)
         draw.rounded_rectangle(box, radius=12, fill=bubble_color)
         draw.text((box[0] + 16, box[1] + 6), actor.label, fill=text_color, font=label_font)
+    return image
 
 
-def _render_scene_frame(scene: SceneSpec, schedule: list[ScheduledLine], duration_s: float, t_s: float, head_size: int) -> Image.Image:
+def _draw_actor(
+    image: Image.Image,
+    actor: ActorSpec,
+    active: ScheduledLine | None,
+    t_s: float,
+    head_size: int,
+    fps: int,
+) -> None:
+    image.alpha_composite(_render_actor_overlay(actor, active, t_s, head_size, fps))
+
+
+def _render_scene_frame(scene: SceneSpec, schedule: list[ScheduledLine], duration_s: float, t_s: float, head_size: int, fps: int) -> Image.Image:
     image = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 255))
     _gradient_background(image, scene.background_top, scene.background_bottom)
     draw = ImageDraw.Draw(image, "RGBA")
@@ -652,7 +761,7 @@ def _render_scene_frame(scene: SceneSpec, schedule: list[ScheduledLine], duratio
     for actor in scene.actors:
         if not actor.visible:
             continue
-        _draw_actor(image, actor, active, t_s, head_size)
+        _draw_actor(image, actor, active, t_s, head_size, fps)
     draw = ImageDraw.Draw(image, "RGBA")
     _draw_caption(draw, scene, progress)
     if active is not None:
@@ -660,15 +769,51 @@ def _render_scene_frame(scene: SceneSpec, schedule: list[ScheduledLine], duratio
     return image.convert("RGB")
 
 
-def _render_scene_video(scene: SceneSpec, schedule: list[ScheduledLine], duration_s: float, head_size: int, output_path: Path) -> None:
-    proc = poseviz._open_ffmpeg_stream(FPS, WIDTH, HEIGHT, output_path)
+def _render_scene_video(
+    scene: SceneSpec,
+    schedule: list[ScheduledLine],
+    duration_s: float,
+    head_size: int,
+    output_path: Path,
+    fps: int,
+    *,
+    fast: bool,
+    fast2: bool,
+    fast3: bool,
+) -> None:
+    preset, crf = poseviz._encoding_profile(fast=fast, fast2=fast2, fast3=fast3)
+    proc = poseviz._open_ffmpeg_stream(fps, WIDTH, HEIGHT, output_path, preset=preset, crf=crf)
     try:
         assert proc.stdin is not None
-        total_frames = max(1, int(round(duration_s * FPS)))
+        total_frames = max(1, int(round(duration_s * fps)))
+        base_frame = _render_scene_base(scene) if fast3 else None
+        static_actors = {
+            actor.actor_id: _render_actor_overlay(actor, None, 0.0, head_size, fps)
+            for actor in scene.actors
+            if actor.visible
+        } if fast3 else {}
+        subtitle_overlays = {
+            (item.speaker_label, item.text): _render_subtitle_overlay(item.speaker_label, item.text)
+            for item in schedule
+        } if fast3 else {}
         for frame_index in range(total_frames):
-            t_s = frame_index / FPS
-            frame = _render_scene_frame(scene, schedule, duration_s, t_s, head_size)
-            proc.stdin.write(frame.tobytes())
+            t_s = frame_index / fps
+            if fast3:
+                frame = base_frame.copy()
+                active = _active_line(schedule, t_s)
+                for actor in scene.actors:
+                    if not actor.visible:
+                        continue
+                    if active is not None and active.speaker_id == actor.actor_id:
+                        frame.alpha_composite(_render_actor_overlay(actor, active, t_s, head_size, fps))
+                    else:
+                        frame.alpha_composite(static_actors[actor.actor_id])
+                if active is not None:
+                    frame.alpha_composite(subtitle_overlays[(active.speaker_label, active.text)])
+                proc.stdin.write(frame.convert("RGB").tobytes())
+            else:
+                frame = _render_scene_frame(scene, schedule, duration_s, t_s, head_size, fps)
+                proc.stdin.write(frame.tobytes())
     finally:
         if proc.stdin is not None:
             proc.stdin.close()
@@ -725,7 +870,8 @@ def _concat_scenes(scene_files: list[Path], output_path: Path) -> None:
         concat_list.unlink(missing_ok=True)
 
 
-def render_story(output_path: Path, *, force: bool = False) -> None:
+def render_story(output_path: Path, *, force: bool = False, fast: bool = False, fast2: bool = False, fast3: bool = False) -> None:
+    fps = _set_render_profile(fast=fast, fast2=fast2, fast3=fast3)
     TMP_DIR.mkdir(parents=True, exist_ok=True)
     head_size = _all_head_size()
     scene_outputs: list[Path] = []
@@ -737,7 +883,7 @@ def render_story(output_path: Path, *, force: bool = False) -> None:
             continue
         schedule, duration_s = _build_schedule(scene, paths["dir"])
         _mix_scene_audio(scene, schedule, duration_s, paths["audio"])
-        _render_scene_video(scene, schedule, duration_s, head_size, paths["video"])
+        _render_scene_video(scene, schedule, duration_s, head_size, paths["video"], fps, fast=fast, fast2=fast2, fast3=fast3)
         _mux_scene(paths["video"], paths["audio"], paths["scene_mp4"])
         scene_outputs.append(paths["scene_mp4"])
         print(paths["scene_mp4"])
@@ -749,8 +895,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Render a multi-character Water Margin dialogue story using DNN pose stickman actors with Chinese subtitles, TTS, BGM, SFX, and action blocking.")
     parser.add_argument("--output", type=Path, default=OUTPUT_DEFAULT)
     parser.add_argument("--force", action="store_true")
+    parser.add_argument("--fast", action="store_true")
+    parser.add_argument("--fast2", action="store_true")
+    parser.add_argument("--fast3", action="store_true")
     args = parser.parse_args()
-    render_story(args.output.resolve(), force=args.force)
+    render_story(args.output.resolve(), force=args.force, fast=args.fast, fast2=args.fast2, fast3=args.fast3)
     return 0
 
 
